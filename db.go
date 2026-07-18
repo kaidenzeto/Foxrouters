@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -74,6 +75,9 @@ func clickhouseDatabase() string {
 type DBStore struct {
 	rdb *redis.Client
 	ch  driver.Conn
+
+	// done signals consumer goroutines to drain and exit.
+	done chan struct{}
 
 	// Async log channels (non-blocking writes to ClickHouse)
 	reqLogCh  chan RequestLog
@@ -156,6 +160,10 @@ func NewDBStore() (*DBStore, error) {
 		return nil, fmt.Errorf("clickhouse open (bootstrap): %w", err)
 	}
 	// Create target database if missing (idempotent).
+	// Validate database name to prevent SQL injection via env var.
+	if len(chDB) == 0 || !regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`).MatchString(chDB) {
+		return nil, fmt.Errorf("invalid CLICKHOUSE_DB name %q: must be alphanumeric/underscore, start with letter", chDB)
+	}
 	if err := bootstrapCh.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", chDB)); err != nil {
 		return nil, fmt.Errorf("clickhouse create database: %w", err)
 	}
@@ -190,6 +198,7 @@ func NewDBStore() (*DBStore, error) {
 	s := &DBStore{
 		rdb:       rdb,
 		ch:        ch,
+		done:      make(chan struct{}),
 		reqLogCh:  make(chan RequestLog, LOG_BUFFER_SIZE),
 		refreshCh: make(chan RefreshLog, LOG_BUFFER_SIZE),
 		eventCh:   make(chan AccountEvent, LOG_BUFFER_SIZE),
@@ -635,6 +644,10 @@ func (s *DBStore) consumeRequestLogs() {
 			}
 		case <-ticker.C:
 			flush()
+		case <-s.done:
+			// Drain remaining items from channel on shutdown.
+			flush()
+			return
 		}
 	}
 }
@@ -686,6 +699,9 @@ func (s *DBStore) consumeRefreshLogs() {
 			}
 		case <-ticker.C:
 			flush()
+		case <-s.done:
+			flush()
+			return
 		}
 	}
 }
@@ -730,6 +746,9 @@ func (s *DBStore) consumeAccountEvents() {
 			}
 		case <-ticker.C:
 			flush()
+		case <-s.done:
+			flush()
+			return
 		}
 	}
 }
@@ -833,6 +852,9 @@ func (s *DBStore) GetModelStats(since time.Time, limit int) ([]ModelStats, error
 		m.TotalTokens = int(tin + tout)
 		results = append(results, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("model stats iteration: %w", err)
+	}
 	return results, nil
 }
 
@@ -911,6 +933,9 @@ func (s *DBStore) GetRecentRequests(limit int) ([]RecentRequest, error) {
 		r.Timestamp = ts.UTC().Format("2006-01-02 15:04:05")
 		out = append(out, r)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[db:ch] recent requests iteration: %v", err)
+	}
 	return out, nil
 }
 
@@ -976,6 +1001,10 @@ func (s *DBStore) GetRequestDetail(id uint64) (*RequestDetail, error) {
 
 // Close gracefully shuts down DB connections.
 func (s *DBStore) Close() {
+	// Signal consumer goroutines to drain and exit.
+	close(s.done)
+	// Give consumers time to flush remaining buffered logs.
+	time.Sleep(500 * time.Millisecond)
 	if s.rdb != nil {
 		_ = s.rdb.Close()
 	}

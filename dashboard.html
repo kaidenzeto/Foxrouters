@@ -1860,12 +1860,30 @@ async function refreshAccounts() {
    ══════════════════════════════════════════════════════════ */
 var editingKeyMasked = null;
 
+// loadCBStats: refresh CodeBuddy key stats table.
+// Called after CB key import/delete operations.
+function loadCBStats() {
+  apiFetch('/cb-stats').then(function(data) {
+    if (!data || !data.codebuddy_keys) return;
+    var el = document.getElementById('cbStatsBody');
+    if (!el) return;
+    el.innerHTML = '';
+    data.codebuddy_keys.forEach(function(k) {
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td class="mono">' + escHtml(k.key) + '</td>' +
+        '<td>' + escHtml(String(k.credits_used)) + '/' + escHtml(String(k.credit_limit)) + '</td>' +
+        '<td>' + escHtml(String(k.total_requests)) + '</td>' +
+        '<td>' + (k.disabled ? '<span style="color:var(--danger)">disabled</span>' : '<span style="color:var(--success)">active</span>') + '</td>';
+      el.appendChild(tr);
+    });
+  }).catch(function(e) { console.warn('[loadCBStats]', e); });
+}
+
 function loadGatewayKeys() {
   var container = document.getElementById('keysContainer');
-  if (!authKey) {
-    container.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-tertiary);font-size:13px">No auth key set. Please set a gateway key first.</div>';
-    return;
-  }
+  // Auth is handled via HttpOnly cookie (foxrouters_session) — no JS key needed.
+  // Previously checked `authKey` which was always empty after cookie migration,
+  // making the entire Keys page non-functional.
 
   apiFetch('/api/keys').then(function(data) {
     if (!data.keys || data.keys.length === 0) {
