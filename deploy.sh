@@ -2,6 +2,9 @@
 # deploy.sh — FoxRouters one-command deploy (no clone needed)
 #
 # Usage:
+#   curl -sL https://raw.githubusercontent.com/rilspratama/Foxrouters/master/deploy.sh | bash
+#
+# Or download + run:
 #   curl -sLO https://raw.githubusercontent.com/rilspratama/Foxrouters/master/deploy.sh
 #   chmod +x deploy.sh
 #   ./deploy.sh
@@ -22,7 +25,8 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 cyan()   { printf '\033[36m%s\033[0m\n' "$*"; }
 bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
-cd "$(dirname "$0")"
+# Work in current directory (works for both pipe and downloaded script)
+# No cd needed — operate in cwd.
 
 # Check docker
 if ! command -v docker &>/dev/null || ! docker compose version &>/dev/null; then

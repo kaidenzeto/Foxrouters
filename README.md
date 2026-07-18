@@ -66,10 +66,7 @@ every request/response to ClickHouse — all behind a single Bearer token.
 > Fastest path. No clone, no build — pulls image from ghcr.io.
 
 ```bash
-# Download deploy script + run
-curl -sLO https://raw.githubusercontent.com/rilspratama/Foxrouters/master/deploy.sh
-chmod +x deploy.sh
-./deploy.sh
+curl -sL https://raw.githubusercontent.com/rilspratama/Foxrouters/master/deploy.sh | bash
 ```
 
 **Output:**
