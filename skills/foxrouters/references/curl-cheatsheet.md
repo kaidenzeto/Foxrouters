@@ -205,3 +205,34 @@ print(r.json()["choices"][0]["message"]["content"])
 models = requests.get(f"{GW}/v1/models", headers=H).json()["data"]
 print([m["id"] for m in models])
 ```
+
+## Custom Models & Aliases (admin, v1.3.0)
+
+```bash
+# List
+curl -s $GW/api/models/custom -H "Authorization: Bearer $KEY"
+curl -s $GW/api/aliases       -H "Authorization: Bearer $KEY"
+
+# Add custom model — id may contain slashes; upstream must be codebuddy or grok.
+# model_name defaults from id (strips cb/ for codebuddy); owned_by defaults to upstream.
+curl -s -X POST $GW/api/models/custom \
+  -H "Authorization: Bearer $KEY" -H "content-type: application/json" \
+  -d '{"id":"cb/kimi-k3","upstream":"codebuddy","model_name":"kimi-k3","owned_by":"codebuddy"}'
+
+# Add alias — client hits "my-claude", proxy routes as "cb/claude-sonnet-4.6".
+curl -s -X POST $GW/api/aliases \
+  -H "Authorization: Bearer $KEY" -H "content-type: application/json" \
+  -d '{"alias":"my-claude","target":"cb/claude-sonnet-4.6"}'
+
+# Delete
+curl -s -X DELETE $GW/api/models/custom/cb/kimi-k3 -H "Authorization: Bearer $KEY"
+curl -s -X DELETE $GW/api/aliases/my-claude       -H "Authorization: Bearer $KEY"
+
+# Verify — custom model appears in /v1/models, alias is honoured by /v1/chat/completions
+curl -s $GW/v1/models -H "Authorization: Bearer $KEY" | jq '.data[] | select(.id=="cb/kimi-k3")'
+curl -s $GW/v1/chat/completions -H "Authorization: Bearer $KEY" -H "content-type: application/json" \
+  -d '{"model":"my-claude","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+Backing store: Redis HASHes `custom_models` and `custom_aliases`. The service
+loads them at boot and refreshes the in-memory cache on every mutation.

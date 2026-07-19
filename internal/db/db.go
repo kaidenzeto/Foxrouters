@@ -38,6 +38,11 @@ const (
 	RK_GATEWAY_KEY  = "gw:key:"       // HASH: name, total_requests
 	RK_RATE_LIMIT   = "rate:"         // STRING: token bucket state per client key
 
+	// Custom-model / alias registry (v1.3.0). Both are Redis HASHes at a
+	// single well-known key — field = id, value = JSON config or target.
+	RK_CUSTOM_MODELS  = "custom_models"  // HASH field=model_id value=CustomModel JSON
+	RK_CUSTOM_ALIASES = "custom_aliases" // HASH field=alias      value=target model_id
+
 	LOG_BUFFER_SIZE    = 10000
 	LOG_FLUSH_INTERVAL = 2 * time.Second
 )
@@ -1048,6 +1053,108 @@ func (s *Store) GetRequestDetail(id uint64) (*RequestDetail, error) {
 		d.ResponseBody = json.RawMessage(respBody)
 	}
 	return &d, nil
+}
+
+// ============================================================================
+// REDIS — Custom models + aliases (v1.3.0)
+// ============================================================================
+
+// CustomModel is a user-defined routing entry. `Upstream` picks the backend
+// (codebuddy | grok), `ModelName` is the actual model string forwarded to
+// that backend (after the cb/ prefix has been stripped for CodeBuddy), and
+// `OwnedBy` is the label shown in /v1/models.
+type CustomModel struct {
+	Upstream  string `json:"upstream"`   // "codebuddy" | "grok"
+	ModelName string `json:"model_name"` // actual name sent upstream
+	OwnedBy   string `json:"owned_by"`   // display label for /v1/models
+}
+
+// LoadCustomModels returns all custom-model entries as a map keyed by model_id.
+func (s *Store) LoadCustomModels() (map[string]CustomModel, error) {
+	out := map[string]CustomModel{}
+	if s == nil || s.rdb == nil {
+		return out, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	vals, err := s.rdb.HGetAll(ctx, RK_CUSTOM_MODELS).Result()
+	if err != nil {
+		return out, err
+	}
+	for id, raw := range vals {
+		var cm CustomModel
+		if err := json.Unmarshal([]byte(raw), &cm); err != nil {
+			slog.Warn("bad custom_models entry", "module", "db-redis", "id", id, "error", err)
+			continue
+		}
+		out[id] = cm
+	}
+	return out, nil
+}
+
+// SaveCustomModel stores one custom-model entry (upsert).
+func (s *Store) SaveCustomModel(id string, cm CustomModel) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	blob, err := json.Marshal(cm)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return s.rdb.HSet(ctx, RK_CUSTOM_MODELS, id, string(blob)).Err()
+}
+
+// DeleteCustomModel removes one custom-model entry.
+func (s *Store) DeleteCustomModel(id string) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return s.rdb.HDel(ctx, RK_CUSTOM_MODELS, id).Err()
+}
+
+// LoadCustomAliases returns all alias → target model_id mappings.
+func (s *Store) LoadCustomAliases() (map[string]string, error) {
+	out := map[string]string{}
+	if s == nil || s.rdb == nil {
+		return out, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	vals, err := s.rdb.HGetAll(ctx, RK_CUSTOM_ALIASES).Result()
+	if err != nil {
+		return out, err
+	}
+	for k, v := range vals {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// SaveCustomAlias stores one alias → target mapping (upsert).
+func (s *Store) SaveCustomAlias(alias, target string) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	if alias == "" || target == "" {
+		return fmt.Errorf("alias and target required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return s.rdb.HSet(ctx, RK_CUSTOM_ALIASES, alias, target).Err()
+}
+
+// DeleteCustomAlias removes one alias entry.
+func (s *Store) DeleteCustomAlias(alias string) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return s.rdb.HDel(ctx, RK_CUSTOM_ALIASES, alias).Err()
 }
 
 // Close gracefully shuts down DB connections.

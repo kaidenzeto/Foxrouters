@@ -9,3 +9,9 @@ import (
 
 // proxyRequest preserves the lowercase name used by main.go's routes wiring.
 var proxyRequest = proxy.ProxyRequest
+
+// v1.3.0 — custom models + aliases registry.
+type CustomRegistry = proxy.CustomRegistry
+
+// NewCustomRegistry preserves the constructor name in package main.
+var NewCustomRegistry = proxy.NewCustomRegistry

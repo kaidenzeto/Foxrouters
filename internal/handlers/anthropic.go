@@ -95,13 +95,22 @@ type anthropicUsage struct {
 
 // mapAnthropicModel translates a client-supplied Anthropic model name into a
 // FoxRouters upstream model. Rules:
+//   - Custom alias match → return the alias target (checked first so users
+//     can override any of the built-in rules below).
 //   - Explicit "cb/" or "grok-" prefix → passthrough (client escape hatch)
 //   - Model containing "grok" → grok-4.5
 //   - Anything else (claude-*) → ANTHROPIC_DEFAULT_MODEL env, or cb/claude-sonnet-4.6
-func mapAnthropicModel(m string) string {
+func mapAnthropicModel(m string, reg *proxy.CustomRegistry) string {
 	m = strings.TrimSpace(m)
 	if m == "" {
 		return defaultAnthropicUpstream()
+	}
+	// Custom alias takes precedence over any hardcoded rule.
+	if reg != nil {
+		resolved, _, _ := reg.Resolve(m)
+		if resolved != m {
+			return resolved
+		}
 	}
 	if strings.HasPrefix(m, "cb/") || strings.HasPrefix(m, "grok-") {
 		return m
@@ -151,8 +160,8 @@ func extractText(raw json.RawMessage) string {
 }
 
 // buildOpenAIBody translates Anthropic → OpenAI /v1/chat/completions payload.
-func buildOpenAIBody(req *anthropicRequest) ([]byte, string, error) {
-	upstreamModel := mapAnthropicModel(req.Model)
+func buildOpenAIBody(req *anthropicRequest, reg *proxy.CustomRegistry) ([]byte, string, error) {
+	upstreamModel := mapAnthropicModel(req.Model, reg)
 
 	msgs := make([]map[string]any, 0, len(req.Messages)+1)
 
@@ -480,8 +489,8 @@ func AnthropicAuthMiddleware() gin.HandlerFunc {
 // It reuses proxy.ProxyRequest for the actual upstream call — routing, auth
 // (Bearer/x-api-key), rate limiting, metrics, and ClickHouse audit all
 // continue to work unchanged; we just translate request/response formats.
-func HandleMessages(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManager, hc *upstream.HealthChecker, authMgr *auth.Manager) gin.HandlerFunc {
-	inner := proxy.ProxyRequest(grokAM, cbKM, hc, authMgr)
+func HandleMessages(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManager, hc *upstream.HealthChecker, authMgr *auth.Manager, reg *proxy.CustomRegistry) gin.HandlerFunc {
+	inner := proxy.ProxyRequest(grokAM, cbKM, hc, authMgr, reg)
 
 	return func(c *gin.Context) {
 		// Cap request body — same limit as chat/completions.
@@ -511,7 +520,7 @@ func HandleMessages(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyMan
 		}
 
 		// Translate → OpenAI format.
-		openaiBody, upstreamModel, err := buildOpenAIBody(&req)
+		openaiBody, upstreamModel, err := buildOpenAIBody(&req, reg)
 		if err != nil {
 			c.JSON(500, gin.H{"type": "error", "error": gin.H{"type": "api_error", "message": "translate failed: " + err.Error()}})
 			return

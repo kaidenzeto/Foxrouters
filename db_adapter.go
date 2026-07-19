@@ -21,13 +21,16 @@ type RequestStats = db.RequestStats
 type ModelStats = db.ModelStats
 type RecentRequest = db.RecentRequest
 type RequestDetail = db.RequestDetail
+type CustomModel = db.CustomModel
 
 // Re-exported constants some domain files still reference by short name.
 const (
-	RK_GROK_ACCOUNT = db.RK_GROK_ACCOUNT
-	RK_CB_KEY       = db.RK_CB_KEY
-	RK_GATEWAY_KEY  = db.RK_GATEWAY_KEY
-	RK_RATE_LIMIT   = db.RK_RATE_LIMIT
+	RK_GROK_ACCOUNT   = db.RK_GROK_ACCOUNT
+	RK_CB_KEY         = db.RK_CB_KEY
+	RK_GATEWAY_KEY    = db.RK_GATEWAY_KEY
+	RK_RATE_LIMIT     = db.RK_RATE_LIMIT
+	RK_CUSTOM_MODELS  = db.RK_CUSTOM_MODELS
+	RK_CUSTOM_ALIASES = db.RK_CUSTOM_ALIASES
 )
 
 // NewDBStore is a thin wrapper preserving the old constructor name.

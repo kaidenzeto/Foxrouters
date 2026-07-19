@@ -224,6 +224,12 @@ Roles: **inference** may call `/v1/*` only; **admin** may call everything.
 | `GET`  | `/history` | admin | Aggregated stats over a time window (`?hours=24`). |
 | `GET`  | `/history/recent` | admin | Recent request previews (`?limit=50`). `id` is a JSON **string**. |
 | `GET`  | `/history/detail/:id` | admin | Full request + response JSON for one call. |
+| `GET`  | `/api/models/custom` | admin | List runtime-registered custom models (v1.3.0). |
+| `POST` | `/api/models/custom` | admin | Register a new custom model: `{id, upstream, model_name, owned_by?}`. |
+| `DELETE` | `/api/models/custom/:id` | admin | Delete a custom model (id may contain `/`, e.g. `cb/kimi-k3`). |
+| `GET`  | `/api/aliases` | admin | List model aliases. |
+| `POST` | `/api/aliases` | admin | Create alias: `{alias, target}` (e.g. `my-claude` → `cb/claude-sonnet-4.6`). |
+| `DELETE` | `/api/aliases/:alias` | admin | Delete an alias. |
 
 ### Example: chat completion
 
@@ -265,6 +271,40 @@ claude
 - `claude-*` → `cb/claude-sonnet-4` (CodeBuddy, default)
 - `claude-*-grok` → `grok-4.5` (Grok upstream)
 - `cb/*` / `grok-*` explicit → passthrough
+
+### Example: register a custom model + alias (v1.3.0)
+
+Custom models let you route any client-facing model id to `codebuddy` or `grok`
+with a chosen upstream model name — no rebuild, just a Redis-backed POST.
+
+```bash
+# 1. Register cb/kimi-k3 → codebuddy (upstream sees "kimi-k3")
+curl -s -X POST http://127.0.0.1:20130/api/models/custom \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "content-type: application/json" \
+  -d '{"id":"cb/kimi-k3","upstream":"codebuddy","model_name":"kimi-k3","owned_by":"codebuddy"}'
+
+# 2. Add alias so clients can say "my-claude" and hit cb/claude-sonnet-4.6
+curl -s -X POST http://127.0.0.1:20130/api/aliases \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "content-type: application/json" \
+  -d '{"alias":"my-claude","target":"cb/claude-sonnet-4.6"}'
+
+# 3. Use it — request goes to CodeBuddy with model=claude-sonnet-4.6.
+curl -s http://127.0.0.1:20130/v1/chat/completions \
+  -H "Authorization: Bearer $GATEWAY_KEY" -H "content-type: application/json" \
+  -d '{"model":"my-claude","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
+
+# 4. Cleanup
+curl -s -X DELETE http://127.0.0.1:20130/api/aliases/my-claude \
+  -H "Authorization: Bearer $ADMIN_KEY"
+curl -s -X DELETE http://127.0.0.1:20130/api/models/custom/cb/kimi-k3 \
+  -H "Authorization: Bearer $ADMIN_KEY"
+```
+
+Aliases are checked **before** the default `grok-*` / `cb/*` routing, so they
+also work for the Anthropic Messages API — `mapAnthropicModel` consults
+aliases first.
 
 ---
 

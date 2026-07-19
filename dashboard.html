@@ -937,6 +937,10 @@ body {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
       Models
     </button>
+    <button class="nav-item" data-route="#/custom" onclick="navigateTo('#/custom')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      Custom Models
+    </button>
   </nav>
   <div class="sidebar-footer">
     <div class="status-row">
@@ -1179,6 +1183,96 @@ body {
       </div>
     </div>
 
+    <!-- ════════ PAGE 5: CUSTOM MODELS & ALIASES (admin) ════════ -->
+    <div class="page" id="page-custom">
+      <!-- Custom Models -->
+      <div class="panel" style="margin-bottom:20px">
+        <div class="panel-head">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/></svg>
+          <h3>Custom Models</h3>
+          <div style="margin-left:auto">
+            <button class="btn-ghost" onclick="loadCustomModels()" style="padding:5px 12px;font-size:12px">Refresh</button>
+          </div>
+        </div>
+        <div style="padding:16px">
+          <div style="display:grid;grid-template-columns:2fr 1fr 2fr 1.5fr auto;gap:8px;margin-bottom:12px;align-items:end">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Model ID</label>
+              <input type="text" id="cmId" placeholder="cb/kimi-k3" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono)" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Upstream</label>
+              <select id="cmUpstream" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px">
+                <option value="codebuddy">codebuddy</option>
+                <option value="grok">grok</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Model Name (upstream)</label>
+              <input type="text" id="cmModelName" placeholder="kimi-k3 (auto-derived if empty)" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono)" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Owned By</label>
+              <input type="text" id="cmOwnedBy" placeholder="codebuddy" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px" />
+            </div>
+            <button class="btn-primary" onclick="addCustomModel()" style="padding:7px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">+ Add</button>
+          </div>
+          <div id="cmError" style="display:none;color:var(--red);font-size:12px;padding:6px 10px;background:rgba(255,80,80,0.08);border-radius:var(--radius-sm);margin-bottom:8px"></div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr style="background:var(--bg);color:var(--text-tertiary);text-align:left">
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Model ID</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Upstream</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Model Name</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Owned By</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong);width:1%"></th>
+              </tr>
+            </thead>
+            <tbody id="cmTableBody">
+              <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-tertiary)">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Aliases -->
+      <div class="panel">
+        <div class="panel-head">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <h3>Model Aliases</h3>
+          <div style="margin-left:auto">
+            <button class="btn-ghost" onclick="loadAliases()" style="padding:5px 12px;font-size:12px">Refresh</button>
+          </div>
+        </div>
+        <div style="padding:16px">
+          <div style="display:grid;grid-template-columns:2fr 2fr auto;gap:8px;margin-bottom:12px;align-items:end">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Alias (client-facing)</label>
+              <input type="text" id="alAlias" placeholder="my-claude" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono)" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Target Model ID</label>
+              <input type="text" id="alTarget" placeholder="cb/claude-sonnet-4.6" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono)" />
+            </div>
+            <button class="btn-primary" onclick="addAlias()" style="padding:7px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">+ Add</button>
+          </div>
+          <div id="alError" style="display:none;color:var(--red);font-size:12px;padding:6px 10px;background:rgba(255,80,80,0.08);border-radius:var(--radius-sm);margin-bottom:8px"></div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr style="background:var(--bg);color:var(--text-tertiary);text-align:left">
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Alias</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Target</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong);width:1%"></th>
+              </tr>
+            </thead>
+            <tbody id="alTableBody">
+              <tr><td colspan="3" style="text-align:center;padding:20px;color:var(--text-tertiary)">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- Key Modal -->
     <div class="modal-overlay" id="keyModal" onclick="if(event.target===this)closeKeyModal()">
       <div class="modal-box" style="max-width:480px">
@@ -1335,7 +1429,8 @@ var routes = {
   '#/':         { page: 'page-dashboard', title: 'Dashboard',   meta: 'Live · auto-refresh 5s' },
   '#/accounts': { page: 'page-accounts',  title: 'Accounts & Keys', meta: 'Live · auto-refresh 5s' },
   '#/keys':     { page: 'page-keys',      title: 'Gateway API Keys', meta: 'Redis-backed · CRUD' },
-  '#/models':   { page: 'page-models',    title: 'Models', meta: 'Usage stats · aliases' }
+  '#/models':   { page: 'page-models',    title: 'Models', meta: 'Usage stats · aliases' },
+  '#/custom':   { page: 'page-custom',    title: 'Custom Models & Aliases', meta: 'Runtime-configurable · Redis-backed' }
 };
 
 function navigateTo(hash) {
@@ -1367,6 +1462,10 @@ function router() {
   }
   if (hash === '#/models') {
     loadModels();
+  }
+  if (hash === '#/custom') {
+    loadCustomModels();
+    loadAliases();
   }
 }
 
@@ -2600,6 +2699,133 @@ document.addEventListener('keydown', function(e) {
     });
   }
 });
+
+/* ══════════════════════════════════════════════════════════
+   CUSTOM MODELS & ALIASES (admin only — v1.3.0)
+   ══════════════════════════════════════════════════════════ */
+async function loadCustomModels() {
+  var tbody = document.getElementById('cmTableBody');
+  if (!tbody) return;
+  try {
+    var res = await api('/api/models/custom');
+    var models = res.models || {};
+    var ids = Object.keys(models).sort();
+    if (ids.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-tertiary)">No custom models. Add one above.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = ids.map(function(id) {
+      var m = models[id] || {};
+      return '<tr>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono);color:var(--emerald)">' + escHtml(id) + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)">' + escHtml(m.upstream || '') + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono)">' + escHtml(m.model_name || '') + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)">' + escHtml(m.owned_by || '') + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost" onclick="deleteCustomModel(' + JSON.stringify(id) + ')" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
+        '</tr>';
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--red)">Error: ' + escHtml(e.message) + '</td></tr>';
+  }
+}
+
+async function addCustomModel() {
+  var errBox = document.getElementById('cmError');
+  errBox.style.display = 'none';
+  var id = document.getElementById('cmId').value.trim();
+  var upstream = document.getElementById('cmUpstream').value;
+  var modelName = document.getElementById('cmModelName').value.trim();
+  var ownedBy = document.getElementById('cmOwnedBy').value.trim();
+  if (!id) {
+    errBox.textContent = 'Model ID is required';
+    errBox.style.display = 'block';
+    return;
+  }
+  try {
+    await api('/api/models/custom', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({id: id, upstream: upstream, model_name: modelName, owned_by: ownedBy})
+    });
+    document.getElementById('cmId').value = '';
+    document.getElementById('cmModelName').value = '';
+    document.getElementById('cmOwnedBy').value = '';
+    loadCustomModels();
+  } catch (e) {
+    errBox.textContent = e.message;
+    errBox.style.display = 'block';
+  }
+}
+
+async function deleteCustomModel(id) {
+  if (!confirm('Delete custom model "' + id + '"?')) return;
+  try {
+    // Path may contain slashes (e.g. cb/kimi-k3) — encode each segment to
+    // preserve them; server DELETE /api/models/custom/*id reads the raw path.
+    await api('/api/models/custom/' + id.split('/').map(encodeURIComponent).join('/'), {method: 'DELETE'});
+    loadCustomModels();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+async function loadAliases() {
+  var tbody = document.getElementById('alTableBody');
+  if (!tbody) return;
+  try {
+    var res = await api('/api/aliases');
+    var aliases = res.aliases || {};
+    var names = Object.keys(aliases).sort();
+    if (names.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:20px;color:var(--text-tertiary)">No aliases. Add one above.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = names.map(function(a) {
+      return '<tr>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono);color:var(--emerald)">' + escHtml(a) + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono)">' + escHtml(aliases[a]) + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost" onclick="deleteAlias(' + JSON.stringify(a) + ')" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
+        '</tr>';
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:20px;color:var(--red)">Error: ' + escHtml(e.message) + '</td></tr>';
+  }
+}
+
+async function addAlias() {
+  var errBox = document.getElementById('alError');
+  errBox.style.display = 'none';
+  var alias = document.getElementById('alAlias').value.trim();
+  var target = document.getElementById('alTarget').value.trim();
+  if (!alias || !target) {
+    errBox.textContent = 'Alias and target are required';
+    errBox.style.display = 'block';
+    return;
+  }
+  try {
+    await api('/api/aliases', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({alias: alias, target: target})
+    });
+    document.getElementById('alAlias').value = '';
+    document.getElementById('alTarget').value = '';
+    loadAliases();
+  } catch (e) {
+    errBox.textContent = e.message;
+    errBox.style.display = 'block';
+  }
+}
+
+async function deleteAlias(alias) {
+  if (!confirm('Delete alias "' + alias + '"?')) return;
+  try {
+    await api('/api/aliases/' + encodeURIComponent(alias), {method: 'DELETE'});
+    loadAliases();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
 </script>
 </body>
 </html>

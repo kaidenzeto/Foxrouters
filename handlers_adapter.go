@@ -38,4 +38,12 @@ var (
 	handleLogout           = handlers.HandleLogout
 	handleMessages         = handlers.HandleMessages
 	anthropicAuthMiddleware = handlers.AnthropicAuthMiddleware
+
+	// v1.3.0 — custom models + aliases
+	handleListCustomModels  = handlers.HandleListCustomModels
+	handleAddCustomModel    = handlers.HandleAddCustomModel
+	handleDeleteCustomModel = handlers.HandleDeleteCustomModel
+	handleListAliases       = handlers.HandleListAliases
+	handleAddAlias          = handlers.HandleAddAlias
+	handleDeleteAlias       = handlers.HandleDeleteAlias
 )

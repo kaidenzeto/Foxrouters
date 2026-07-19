@@ -242,6 +242,50 @@ curl -s http://127.0.0.1:20130/health -H "Authorization: Bearer $KEY" | python3 
 curl -s "http://127.0.0.1:20130/history/recent?limit=10" -H "Authorization: Bearer $KEY"
 ```
 
+### 6. Custom Models & Aliases (admin only, v1.3.0)
+
+Route any client-facing model id to `codebuddy` / `grok` with a chosen upstream
+`model_name` — Redis-backed, no rebuild. Aliases rewrite the incoming model
+name before routing (also honoured by the Anthropic Messages API).
+
+**List custom models:**
+```bash
+curl -s http://127.0.0.1:20130/api/models/custom -H "Authorization: Bearer $KEY"
+```
+
+**Register a custom model:**
+```bash
+curl -s -X POST http://127.0.0.1:20130/api/models/custom \
+  -H "Authorization: Bearer $KEY" -H "content-type: application/json" \
+  -d '{"id":"cb/kimi-k3","upstream":"codebuddy","model_name":"kimi-k3","owned_by":"codebuddy"}'
+# → {"ok":true,"id":"cb/kimi-k3"}
+# Now visible in /v1/models AND routable via POST /v1/chat/completions {"model":"cb/kimi-k3",...}
+```
+
+**Delete a custom model** (id may contain `/`):
+```bash
+curl -s -X DELETE http://127.0.0.1:20130/api/models/custom/cb/kimi-k3 -H "Authorization: Bearer $KEY"
+```
+
+**Add / delete alias:**
+```bash
+curl -s -X POST http://127.0.0.1:20130/api/aliases \
+  -H "Authorization: Bearer $KEY" -H "content-type: application/json" \
+  -d '{"alias":"my-claude","target":"cb/claude-sonnet-4.6"}'
+# → {"ok":true,"alias":"my-claude","target":"cb/claude-sonnet-4.6"}
+
+curl -s -X DELETE http://127.0.0.1:20130/api/aliases/my-claude -H "Authorization: Bearer $KEY"
+```
+
+**Resolve order** (inside `proxy.ProxyRequest`):
+1. Alias lookup (single hop; `a→b` does *not* chain to `b→c`)
+2. Custom-model lookup on the resolved id — sets upstream + upstream model_name
+3. Fall through to prefix routing (`grok-*` / `cb/*`)
+
+Aliases and custom models live in Redis HASHes `custom_aliases` and
+`custom_models`; the process caches them in memory behind a `sync.RWMutex` and
+refreshes the map on every mutation.
+
 ## Python Helper
 
 ```python

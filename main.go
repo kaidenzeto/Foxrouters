@@ -122,6 +122,13 @@ func main() {
 	// (rateLimiter previously carried a db handle for rate-limited request
 	//  logging, but nothing actually consumed it — dropped in the split.)
 
+	// Custom models + aliases registry (v1.3.0). Redis-backed, cached in
+	// memory — reloaded on every mutation via handlers.
+	customReg := NewCustomRegistry(db)
+	if err := customReg.Load(); err != nil {
+		slog.Warn("custom registry Load failed, starting empty", "module", "custom", "error", err)
+	}
+
 	go autoRefreshWorker(grokAM)
 	go reenableWorker(grokAM)
 	go reenableCBWorker(cbKM)
@@ -200,6 +207,17 @@ func main() {
 	r.GET("/history", adminAuth, handleHistory(db))
 	r.GET("/history/recent", adminAuth, handleRecentRequests(db))
 	r.GET("/history/detail/:id", adminAuth, handleHistoryDetail(db))
+
+	// Custom models + aliases (v1.3.0) — admin only, runtime-configurable.
+	// The /api/models/custom/*id catch-all preserves slashes in ids like
+	// "cb/kimi-k3" (gin's :id param would only match one non-slash segment).
+	r.GET("/api/models/custom", adminAuth, handleListCustomModels(customReg))
+	r.POST("/api/models/custom", adminAuth, handleAddCustomModel(customReg))
+	r.DELETE("/api/models/custom/*id", adminAuth, handleDeleteCustomModel(customReg))
+	r.GET("/api/aliases", adminAuth, handleListAliases(customReg))
+	r.POST("/api/aliases", adminAuth, handleAddAlias(customReg))
+	r.DELETE("/api/aliases/:alias", adminAuth, handleDeleteAlias(customReg))
+
 	// /v1/*path catch-all — gin's httprouter doesn't allow a static
 	// /v1/messages segment alongside /v1/*path, so we dispatch the
 	// Anthropic Messages API adapter from inside the catch-all (POST only).
@@ -207,10 +225,10 @@ func main() {
 	// anthropicAuthMiddleware (rewrites x-api-key → Authorization: Bearer).
 	r.Any("/v1/*path", func(c *gin.Context) {
 		if c.Request.URL.Path == "/v1/messages" && c.Request.Method == http.MethodPost {
-			handleMessages(grokAM, cbKM, hc, authMgr)(c)
+			handleMessages(grokAM, cbKM, hc, authMgr, customReg)(c)
 			return
 		}
-		proxyRequest(grokAM, cbKM, hc, authMgr)(c)
+		proxyRequest(grokAM, cbKM, hc, authMgr, customReg)(c)
 	})
 
 	r.GET("/", func(c *gin.Context) {

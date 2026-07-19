@@ -101,7 +101,12 @@ func toString(v interface{}) string {
 // requested model, expands Grok aliases, enforces per-key model whitelists,
 // records Prometheus metrics, updates per-key token quotas, and emits an
 // async RequestLog to ClickHouse for chat completions only.
-func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManager, hc *upstream.HealthChecker, authMgr *auth.Manager) gin.HandlerFunc {
+//
+// The optional `registry` argument (may be nil) resolves runtime-configured
+// custom models + aliases (see internal/proxy/custom.go). Aliases are
+// rewritten in-body before routing; custom models override the default
+// grok-* / cb/* prefix routing.
+func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManager, hc *upstream.HealthChecker, authMgr *auth.Manager, registry *CustomRegistry) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 
@@ -160,6 +165,12 @@ func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 				// CodeBuddy — Default
 				{"id": "cb/default-model", "object": "model", "owned_by": "codebuddy"},
 			}
+			// Append runtime-registered custom models.
+			if registry != nil {
+				for _, entry := range registry.ListModels() {
+					models = append(models, gin.H{"id": entry.ID, "object": "model", "owned_by": entry.OwnedBy})
+				}
+			}
 			c.JSON(200, gin.H{"object": "list", "data": models})
 			return
 		}
@@ -196,18 +207,38 @@ func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 			body, _ = json.Marshal(bodyMap)
 		}
 
+		// Custom alias + custom model resolution (runtime-configured).
+		// 1) Alias rewrite (single hop): "my-claude" → "cb/claude-sonnet-4.6"
+		// 2) Custom-model lookup: if resolved id is registered, override the
+		//    routing upstream + the model_name that goes over the wire.
+		var customUpstream, customModelName string
+		if registry != nil {
+			resolved, up, mn := registry.Resolve(model)
+			if resolved != model {
+				model = resolved
+				bodyMap["model"] = model
+				body, _ = json.Marshal(bodyMap)
+			}
+			customUpstream = up
+			customModelName = mn
+		}
+
 		// Model alias expansion: grok-4.5-{high,medium,low,auto,none} → grok-4.5 + reasoning_effort
 		// Mirrors 9router's grok-cli provider (upstreamModelId + thinking level).
-		if effort, ok := upstream.ExpandGrokAlias(model); ok {
-			model = "grok-4.5"
-			bodyMap["model"] = model
-			// Only set reasoning_effort if client didn't specify one already
-			if _, has := bodyMap["reasoning_effort"]; !has {
-				if _, has2 := bodyMap["reasoning"]; !has2 {
-					bodyMap["reasoning_effort"] = effort
+		// Skip when a custom model has already routed us — the custom model_name
+		// is authoritative in that case.
+		if customUpstream == "" {
+			if effort, ok := upstream.ExpandGrokAlias(model); ok {
+				model = "grok-4.5"
+				bodyMap["model"] = model
+				// Only set reasoning_effort if client didn't specify one already
+				if _, has := bodyMap["reasoning_effort"]; !has {
+					if _, has2 := bodyMap["reasoning"]; !has2 {
+						bodyMap["reasoning_effort"] = effort
+					}
 				}
+				body, _ = json.Marshal(bodyMap)
 			}
-			body, _ = json.Marshal(bodyMap)
 		}
 
 		// Per-key model whitelist check.
@@ -240,11 +271,40 @@ func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 
 		startTime := time.Now()
 		upstreamName := "codebuddy"
-		if upstream.IsGrokModel(model) {
+
+		// Routing decision:
+		//   1. Custom model → routes to its declared upstream. If a ModelName
+		//      override is set, we rewrite bodyMap[model] to that name so the
+		//      upstream sees the "real" model. cbTransform strips the cb/
+		//      prefix, so for CodeBuddy we prepend one to keep its stripCBPrefix
+		//      happy; grok upstream sees the model_name as-is.
+		//   2. Fall through to prefix routing (grok-* vs cb/*).
+		switch customUpstream {
+		case "grok":
 			upstreamName = "grok"
-			upstream.ProxyGrok(c, body, grokAM, clientStream, hc, model)
-		} else {
+			effectiveModel := model
+			if customModelName != "" {
+				effectiveModel = customModelName
+				bodyMap["model"] = effectiveModel
+				body, _ = json.Marshal(bodyMap)
+			}
+			upstream.ProxyGrok(c, body, grokAM, clientStream, hc, effectiveModel)
+		case "codebuddy":
+			upstreamName = "codebuddy"
+			if customModelName != "" {
+				// cbTransform will TrimPrefix("cb/") on this — prepend so the
+				// upstream sees exactly customModelName.
+				bodyMap["model"] = "cb/" + customModelName
+				body, _ = json.Marshal(bodyMap)
+			}
 			upstream.ProxyCodeBuddy(c, body, bodyMap, cbKM, clientStream, hc)
+		default:
+			if upstream.IsGrokModel(model) {
+				upstreamName = "grok"
+				upstream.ProxyGrok(c, body, grokAM, clientStream, hc, model)
+			} else {
+				upstream.ProxyCodeBuddy(c, body, bodyMap, cbKM, clientStream, hc)
+			}
 		}
 
 		// Record Prometheus metrics for this proxied request. Bucket status by
@@ -283,12 +343,7 @@ func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 				RequestID:  c.GetString("request_id"),
 				ClientKey:  c.GetString("client_key_masked"),
 				Model:      model,
-				Upstream: func() string {
-					if upstream.IsGrokModel(model) {
-						return "grok"
-					}
-					return "codebuddy"
-				}(),
+				Upstream:   upstreamName,
 				AccountID:  c.GetString("upstream_account"),
 				StatusCode: c.Writer.Status(),
 				LatencyMs:  int(time.Since(startTime).Milliseconds()),

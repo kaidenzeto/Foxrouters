@@ -8,6 +8,63 @@ Policy: **test (`go test -race`) before build/restart**. Secrets only via `.gate
 
 ---
 
+## v1.3.0 — Custom Models + Aliases (runtime-configurable) (2026-07-19)
+
+### What changed
+
+| Area | Before | After |
+|------|--------|-------|
+| Model catalog | Hardcoded ~42 entries in `internal/proxy/proxy.go` | + **runtime custom models** via `POST /api/models/custom` (Redis-backed, no rebuild) |
+| Anthropic aliases | Hardcoded `claude-*` → `cb/claude-sonnet-4.6` | + **user-defined aliases** checked first (`mapAnthropicModel` walks the alias table before the built-in rules) |
+| Model routing | Prefix-based (`grok-*` / `cb/*`) | + **custom model override** — declare upstream (`codebuddy`/`grok`) + upstream `model_name` per id |
+| Dashboard | 4 pages (Dashboard, Accounts, Keys, Models) | + **Custom Models & Aliases** page (`#/custom`, admin) with CRUD forms |
+| Tests | 38 tests | **52 tests** — 14 new covering registry Resolve, CRUD, `/v1/models` append, concurrency |
+
+### New endpoints (all admin)
+
+| Method | Path | Body / Response |
+|--------|------|----------------|
+| `GET` | `/api/models/custom` | `{models: {id: {upstream, model_name, owned_by}}}` |
+| `POST` | `/api/models/custom` | `{id, upstream, model_name, owned_by?}` — validates upstream ∈ {codebuddy, grok} |
+| `DELETE` | `/api/models/custom/*id` | slash-tolerant path (id may be `cb/kimi-k3`) |
+| `GET` | `/api/aliases` | `{aliases: {alias: target}}` |
+| `POST` | `/api/aliases` | `{alias, target}` — rejects self-loops |
+| `DELETE` | `/api/aliases/:alias` | |
+
+### Redis schema
+
+- `custom_models` HASH: field=model_id (e.g. `cb/kimi-k3`), value=JSON `{upstream, model_name, owned_by}`
+- `custom_aliases` HASH: field=alias, value=target model_id
+
+### New files
+
+- `internal/proxy/custom.go` — `CustomRegistry` (sync.RWMutex-guarded in-memory cache backed by Redis)
+- `internal/handlers/custom.go` — 6 admin handlers
+- `custom_test.go` — 14 tests (Resolve, ListModels, CRUD, validation, concurrency, /v1/models append)
+
+### Modified files
+
+- `internal/db/db.go` — `CustomModel` struct + 6 methods (`Load/Save/DeleteCustomModel`, `Load/Save/DeleteCustomAlias`); new consts `RK_CUSTOM_MODELS`, `RK_CUSTOM_ALIASES`
+- `internal/proxy/proxy.go` — Resolve step before Grok-alias expansion; routing switch honours `customUpstream`; `/v1/models` appends `registry.ListModels()`; ClickHouse `Upstream` field now uses `upstreamName`
+- `internal/handlers/anthropic.go` — `mapAnthropicModel(m, reg)` consults aliases first, then falls back to hardcoded rules; signature threading for `buildOpenAIBody` + `HandleMessages`
+- `main.go` — startup `customReg := NewCustomRegistry(db); customReg.Load()`; 6 new routes; registry threaded to `proxyRequest` + `handleMessages`
+- `handlers_adapter.go`, `db_adapter.go`, `proxy_adapter.go` — new re-exports
+- `dashboard.html` — new page `#/custom` (Custom Models table + Alias table + inline forms), nav item, route wiring, 6 JS functions
+
+### Design notes
+
+- **Load once, refresh on mutation**: `NewCustomRegistry(db).Load()` at boot; every Add/Delete mutates Redis first, then updates the map under `sync.RWMutex`. Hot-path Resolve is a single RLock.
+- **Alias resolution is single-hop** — no recursion, no cycles. Documented in `Resolve()` godoc.
+- **Custom models override prefix routing** — Grok alias expansion (`grok-4.5-high` → `grok-4.5`) is skipped when a custom model has already claimed the id, so the operator can register `grok-4.5-high` as a custom entry without the alias table stealing it.
+- **cbTransform integration**: for `codebuddy` upstream we set `bodyMap["model"] = "cb/" + customModelName` so the existing `stripCBPrefix` in `cbTransform` unwraps it to the intended model_name.
+- **Nil-safe store**: registry accepts a `nil` `*db.Store` (used by unit tests) — mutations touch the in-memory map only.
+
+### Commits
+
+_(see git log for `feat: custom models + aliases`)_
+
+---
+
 ## v1.2.0 — Anthropic Messages API + GPT-5.6 + cleanup tooling (2026-07-19)
 
 ### What changed
