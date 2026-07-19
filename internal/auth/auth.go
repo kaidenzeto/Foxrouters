@@ -528,7 +528,7 @@ func AuthMiddleware(am *Manager) gin.HandlerFunc {
 
 		if key == "" {
 			// For browser requests (Accept: text/html), redirect to login
-			if strings.Contains(c.GetHeader("Accept"), "text/html") && path != "/api/" {
+			if strings.Contains(c.GetHeader("Accept"), "text/html") && !strings.HasPrefix(path, "/api/") {
 				c.Redirect(302, "/login")
 				c.Abort()
 				return
@@ -540,7 +540,8 @@ func AuthMiddleware(am *Manager) gin.HandlerFunc {
 		if !am.Valid(key) {
 			// Invalid cookie session → clear it and redirect to login
 			if _, err := c.Cookie("foxrouters_session"); err == nil {
-				c.SetCookie("foxrouters_session", "", -1, "/", "", false, true)
+				cookieSecure := os.Getenv("COOKIE_SECURE") != "0"
+				c.SetCookie("foxrouters_session", "", -1, "/", "", cookieSecure, true)
 				if strings.Contains(c.GetHeader("Accept"), "text/html") {
 					c.Redirect(302, "/login")
 					c.Abort()
@@ -611,7 +612,11 @@ func loadGatewayKeys(s *db.Store) ([]*GatewayKeyInfo, error) {
 			Disabled:      d.Disabled,
 		}
 		if info.Role == "" {
-			info.Role = RoleAdmin
+			// Least-privilege default: inference only. Only bootstrap keys
+			// (explicitly set to RoleAdmin at creation) should be admin.
+			// This prevents latent privilege escalation if a persistence bug
+			// ever clears the role field (P3 #8 security fix).
+			info.Role = RoleInference
 		}
 		out = append(out, info)
 	}

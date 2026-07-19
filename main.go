@@ -173,7 +173,9 @@ func main() {
 
 	r.GET("/dashboard", handleDashboard())
 	r.GET("/login", handleLogin(authMgr))
-	r.POST("/login", handleLogin(authMgr))
+	// P3 #6: rate limit /login POST by client IP (5/min, 20/hour) to prevent brute-force.
+	loginLimiter := newLoginLimiter()
+	r.POST("/login", loginLimiter.middleware(), handleLogin(authMgr))
 	r.GET("/logout", handleLogout())
 	r.GET("/health", handleHealth(grokAM, cbKM, hc, authMgr))
 	r.HEAD("/health", handleHealthMinimal())
@@ -193,7 +195,6 @@ func main() {
 			}
 			stats = append(stats, gin.H{
 				"key":            keyDisplay,
-				"key_full":       k.Key, // full key for admin delete operations
 				"credits_used":   credits,
 				"credit_limit":   CB_CREDIT_LIMIT,
 				"credits_left":   CB_CREDIT_LIMIT - credits,

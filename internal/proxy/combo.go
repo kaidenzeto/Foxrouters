@@ -191,16 +191,13 @@ func (r *ComboRegistry) AddCombo(c Combo) error {
 	}
 	c.Name = strings.TrimSpace(c.Name)
 	c.Strategy = strings.TrimSpace(c.Strategy)
-	if c.Name == "" {
-		return fmt.Errorf("name required")
+	if err := validateName(c.Name, "name"); err != nil {
+		return err
 	}
 	// Reserve the "combo/" prefix — combos are addressed as combo/<name>, so
 	// letting the name itself start with "combo/" would create combo/combo/x.
 	if strings.HasPrefix(c.Name, "combo/") {
 		return fmt.Errorf("name must not start with 'combo/'")
-	}
-	if strings.ContainsAny(c.Name, " \t\n\r") {
-		return fmt.Errorf("name must not contain whitespace")
 	}
 	switch c.Strategy {
 	case "":

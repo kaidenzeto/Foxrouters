@@ -165,8 +165,8 @@ func (r *CustomRegistry) AddModel(id string, cm db.CustomModel) error {
 	cm.Upstream = strings.TrimSpace(cm.Upstream)
 	cm.ModelName = strings.TrimSpace(cm.ModelName)
 	cm.OwnedBy = strings.TrimSpace(cm.OwnedBy)
-	if id == "" {
-		return fmt.Errorf("id required")
+	if err := validateName(id, "id"); err != nil {
+		return err
 	}
 	switch cm.Upstream {
 	case "codebuddy", "grok":
@@ -218,8 +218,11 @@ func (r *CustomRegistry) AddAlias(alias, target string) error {
 	}
 	alias = strings.TrimSpace(alias)
 	target = strings.TrimSpace(target)
-	if alias == "" || target == "" {
-		return fmt.Errorf("alias and target required")
+	if err := validateName(alias, "alias"); err != nil {
+		return err
+	}
+	if err := validateName(target, "target"); err != nil {
+		return err
 	}
 	if alias == target {
 		return fmt.Errorf("alias cannot point to itself")

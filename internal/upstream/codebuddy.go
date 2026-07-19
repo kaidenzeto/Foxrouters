@@ -223,6 +223,28 @@ func (km *CBKeyManager) GetAll() []*CBKey {
 	return r
 }
 
+// ResolveKey resolves a masked key (e.g. "ck_abcde...wxyz") or full key
+// to the full key string. Returns empty string if not found.
+// This allows the dashboard to delete by masked key without the backend
+// returning full keys in list responses (P3 #4 security fix).
+func (km *CBKeyManager) ResolveKey(maskedOrFull string) string {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+	for _, k := range km.keys {
+		if k.Key == maskedOrFull {
+			return k.Key
+		}
+		// Check masked form: first 8 + "..." + last 4
+		if len(k.Key) > 12 {
+			masked := k.Key[:8] + "..." + k.Key[len(k.Key)-4:]
+			if masked == maskedOrFull {
+				return k.Key
+			}
+		}
+	}
+	return ""
+}
+
 // AddKey hot-imports a CodeBuddy API key into the runtime pool + Redis.
 func (km *CBKeyManager) AddKey(apiKey string) (added bool, total int) {
 	apiKey = strings.TrimSpace(apiKey)
@@ -477,9 +499,11 @@ func ProxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 				strings.Contains(bodyStr, "service info not found") ||
 				strings.Contains(bodyStr, "model [") && strings.Contains(bodyStr, "] service info not found")) {
 				hc.CB.RecordRequest(time.Since(reqStart), fmt.Errorf("cb 400 model not found"))
-				c.JSON(400, gin.H{"error": "model not available on CodeBuddy", "detail": truncateLog(bodyStr, 500)})
-				c.Set("error_msg", truncateLog(bodyStr, 500))
-				errJSON, _ := json.Marshal(gin.H{"error": "model not available on CodeBuddy", "detail": truncateLog(bodyStr, 500)})
+				// P3 #7: Don't leak upstream body (contains requestId + internal tracing).
+				// Return generic message only.
+				c.JSON(400, gin.H{"error": "model not available on CodeBuddy"})
+				c.Set("error_msg", "model not available on CodeBuddy")
+				errJSON, _ := json.Marshal(gin.H{"error": "model not available on CodeBuddy"})
 				c.Set("response_body", json.RawMessage(errJSON))
 				return
 			}

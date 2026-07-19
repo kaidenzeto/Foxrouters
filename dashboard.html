@@ -1552,6 +1552,39 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// ══════════════════════════════════════════════════════════
+// GLOBAL DELETE/EDIT HANDLERS (XSS-safe via data-* attributes)
+// Replaces vulnerable inline onclick handlers. Event delegation
+// on document so dynamically-rendered buttons auto-bind.
+// ══════════════════════════════════════════════════════════
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('button[data-key], button[data-email], button[data-id], button[data-alias], button[data-name]');
+  if (!btn) return;
+  var v;
+  if (btn.classList.contains('delete-cb-btn')) {
+    v = btn.getAttribute('data-key');
+    if (v) deleteCBKey(v);
+  } else if (btn.classList.contains('delete-grok-btn')) {
+    v = btn.getAttribute('data-email');
+    if (v) deleteGrokAccount(v);
+  } else if (btn.classList.contains('delete-key-btn')) {
+    v = btn.getAttribute('data-key');
+    if (v) deleteKey(v);
+  } else if (btn.classList.contains('edit-key-btn')) {
+    v = btn.getAttribute('data-key');
+    if (v) showEditKeyModal(v);
+  } else if (btn.classList.contains('delete-custom-btn')) {
+    v = btn.getAttribute('data-id');
+    if (v) deleteCustomModel(v);
+  } else if (btn.classList.contains('delete-alias-btn')) {
+    v = btn.getAttribute('data-alias');
+    if (v) deleteAlias(v);
+  } else if (btn.classList.contains('delete-combo-btn')) {
+    v = btn.getAttribute('data-name');
+    if (v) deleteCombo(v);
+  }
+});
+
 /* ══════════════════════════════════════════════════════════
    REFRESH (health + accounts + cb-stats + models)
    ══════════════════════════════════════════════════════════ */
@@ -1672,7 +1705,7 @@ function renderGrokPage() {
       '<td class="muted" style="font-size:11px">' + expAt + '</td>' +
       '<td class="muted" style="font-size:11px">' + lastRef + '</td>' +
       '<td class="muted" style="font-size:11px">' + disAt + '</td>' +
-      '<td><button class="btn-ghost" onclick="deleteGrokAccount(\'' + escHtml(a.email) + '\')" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
+      '<td><button class="btn-ghost delete-grok-btn" data-email="' + escHtml(a.email) + '" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
     '</tr>';
   }
   document.getElementById('grokBody').innerHTML = gRows || '<tr><td colspan="6" class="history-empty">No Grok accounts loaded</td></tr>';
@@ -1742,7 +1775,7 @@ function renderCBPage() {
       '<td><div class="pbar"><div class="pbar-fill ' + color + '" style="width:' + pct + '%"></div></div>' + (k.credit_limit - k.credits_used).toFixed(1) + ' left</td>' +
       '<td class="mono">' + k.total_requests + '</td>' +
       '<td>' + status + '</td>' +
-      '<td><button class="btn-ghost" onclick="deleteCBKey(\'' + escHtml(k.key_full || k.key) + '\')" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
+      '<td><button class="btn-ghost delete-cb-btn" data-key="' + escHtml(k.key) + '" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
     '</tr>';
   }
   document.getElementById('cbBody').innerHTML = cbRows || '<tr><td colspan="6" class="history-empty">No CodeBuddy keys loaded</td></tr>';
@@ -2103,8 +2136,8 @@ function loadGatewayKeys() {
         '<td style="padding:10px;text-align:right;font-family:var(--mono);color:var(--text-tertiary)">' + formatNum(k.requests) + '</td>' +
         '<td style="padding:10px;text-align:center">' + statusBadge + '</td>' +
         '<td style="padding:10px;text-align:right">' +
-          '<button class="btn-ghost" onclick="showEditKeyModal(\'' + k.key_masked + '\')" style="padding:3px 8px;font-size:12px">Edit</button> ' +
-          '<button class="btn-ghost" onclick="deleteKey(\'' + k.key_masked + '\')" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button>' +
+          '<button class="btn-ghost edit-key-btn" data-key="' + escHtml(k.key_masked) + '" style="padding:3px 8px;font-size:12px">Edit</button> ' +
+          '<button class="btn-ghost delete-key-btn" data-key="' + escHtml(k.key_masked) + '" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button>' +
         '</td>' +
       '</tr>';
     });
@@ -2911,7 +2944,7 @@ async function loadCustomModels() {
         '<td style="padding:8px;border-bottom:1px solid var(--border)">' + escHtml(m.upstream || '') + '</td>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono)">' + escHtml(m.model_name || '') + '</td>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border)">' + escHtml(m.owned_by || '') + '</td>' +
-        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost" onclick="deleteCustomModel(\'' + id.replace(/'/g, "\\'") + '\')" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost delete-custom-btn" data-id="' + escHtml(id) + '" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
         '</tr>';
     }).join('');
   } catch (e) {
@@ -2974,7 +3007,7 @@ async function loadAliases() {
       return '<tr>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono);color:var(--emerald)">' + escHtml(a) + '</td>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono)">' + escHtml(aliases[a]) + '</td>' +
-        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost" onclick="deleteAlias(\'' + a.replace(/'/g, "\\'") + '\')" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost delete-alias-btn" data-alias="' + escHtml(a) + '" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
         '</tr>';
     }).join('');
   } catch (e) {
@@ -3047,7 +3080,7 @@ async function loadCombos() {
         '<td style="padding:8px;border-bottom:1px solid var(--border)">' + strategyBadge + '</td>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border)">' + modelsHtml + '</td>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border);color:var(--text-tertiary)">' + escHtml(desc) + '</td>' +
-        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost" onclick="deleteCombo(\'' + name.replace(/'/g, "\\'") + '\')" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost delete-combo-btn" data-name="' + escHtml(name) + '" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
       '</tr>';
     }).join('');
   } catch (e) {

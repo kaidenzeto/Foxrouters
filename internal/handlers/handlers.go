@@ -147,7 +147,6 @@ func HandleAccounts(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyMan
 			cbResult = append(cbResult, gin.H{
 				"provider":       "codebuddy",
 				"key":            k.Key[:8] + "..." + k.Key[len(k.Key)-4:],
-				"key_full":       k.Key, // full key for admin delete operations
 				"disabled":       disabled,
 				"credits_used":   credits,
 				"credits_left":   upstream.CB_CREDIT_LIMIT - credits,
@@ -710,7 +709,9 @@ func HandleLogin(am *auth.Manager) gin.HandlerFunc {
 		// but we set it explicitly for defense-in-depth). Secure=false because the gateway
 		// typically runs behind a reverse proxy that terminates TLS.
 		c.SetSameSite(http.SameSiteLaxMode)
-		c.SetCookie("foxrouters_session", req.Key, 7*24*3600, "/", "", false, true)
+		// Secure flag: default true (HTTPS-only). Set COOKIE_SECURE=0 for dev HTTP.
+		cookieSecure := os.Getenv("COOKIE_SECURE") != "0"
+		c.SetCookie("foxrouters_session", req.Key, 7*24*3600, "/", "", cookieSecure, true)
 		c.Redirect(302, "/dashboard")
 	}
 }
@@ -718,7 +719,8 @@ func HandleLogin(am *auth.Manager) gin.HandlerFunc {
 // HandleLogout clears the session cookie and redirects to /login.
 func HandleLogout() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.SetCookie("foxrouters_session", "", -1, "/", "", false, true)
+		cookieSecure := os.Getenv("COOKIE_SECURE") != "0"
+		c.SetCookie("foxrouters_session", "", -1, "/", "", cookieSecure, true)
 		c.Redirect(302, "/login")
 	}
 }
@@ -727,16 +729,22 @@ func HandleLogout() gin.HandlerFunc {
 // CB KEY MANAGEMENT (delete + cleanup)
 // ============================================================================
 
-// HandleDeleteCBKey deletes a CodeBuddy key by its key string.
+// HandleDeleteCBKey deletes a CodeBuddy key by its key string (full or masked).
 func HandleDeleteCBKey(cbKM *upstream.CBKeyManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		key := c.Param("key")
-		if key == "" {
+		keyParam := c.Param("key")
+		if keyParam == "" {
 			c.JSON(400, gin.H{"error": "key required"})
 			return
 		}
-		if !cbKM.DeleteKey(key) {
-			c.JSON(404, gin.H{"error": "cb key not found", "key": key})
+		// Resolve masked key → full key (P3 #4: don't return full keys in lists)
+		fullKey := cbKM.ResolveKey(keyParam)
+		if fullKey == "" {
+			c.JSON(404, gin.H{"error": "cb key not found"})
+			return
+		}
+		if !cbKM.DeleteKey(fullKey) {
+			c.JSON(404, gin.H{"error": "cb key not found"})
 			return
 		}
 		remaining := cbKM.Len()
