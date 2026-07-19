@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -59,9 +60,9 @@ func redisConfig() (addr, password string, db int) {
 	return
 }
 
-// clickhouseAddr returns host:port for native protocol (default 127.0.0.1:9001).
+// clickhouseAddr returns host:port for native protocol (default 127.0.0.1:9000).
 func clickhouseAddr() string {
-	return envOr("CLICKHOUSE_ADDR", "127.0.0.1:9001")
+	return envOr("CLICKHOUSE_ADDR", "127.0.0.1:9000")
 }
 
 func clickhouseDatabase() string {
@@ -78,6 +79,8 @@ type DBStore struct {
 
 	// done signals consumer goroutines to drain and exit.
 	done chan struct{}
+	// wg tracks consumer goroutines so Close() can wait for them to flush.
+	wg sync.WaitGroup
 
 	// Async log channels (non-blocking writes to ClickHouse)
 	reqLogCh  chan RequestLog
@@ -210,6 +213,7 @@ func NewDBStore() (*DBStore, error) {
 	}
 
 	// Start async log consumers
+	s.wg.Add(3)
 	go s.consumeRequestLogs()
 	go s.consumeRefreshLogs()
 	go s.consumeAccountEvents()
@@ -582,6 +586,7 @@ func bodyString(raw json.RawMessage) string {
 }
 
 func (s *DBStore) consumeRequestLogs() {
+	defer s.wg.Done()
 	batch := make([]RequestLog, 0, 200)
 	ticker := time.NewTicker(LOG_FLUSH_INTERVAL)
 	defer ticker.Stop()
@@ -660,6 +665,7 @@ func max0(n int) int {
 }
 
 func (s *DBStore) consumeRefreshLogs() {
+	defer s.wg.Done()
 	batch := make([]RefreshLog, 0, 50)
 	ticker := time.NewTicker(LOG_FLUSH_INTERVAL)
 	defer ticker.Stop()
@@ -707,6 +713,7 @@ func (s *DBStore) consumeRefreshLogs() {
 }
 
 func (s *DBStore) consumeAccountEvents() {
+	defer s.wg.Done()
 	batch := make([]AccountEvent, 0, 50)
 	ticker := time.NewTicker(LOG_FLUSH_INTERVAL)
 	defer ticker.Stop()
@@ -1003,8 +1010,14 @@ func (s *DBStore) GetRequestDetail(id uint64) (*RequestDetail, error) {
 func (s *DBStore) Close() {
 	// Signal consumer goroutines to drain and exit.
 	close(s.done)
-	// Give consumers time to flush remaining buffered logs.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for consumers to flush buffered logs, with a 10s safety cap.
+	done := make(chan struct{})
+	go func() { s.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		log.Printf("[db] warning: consumer drain timed out after 10s")
+	}
 	if s.rdb != nil {
 		_ = s.rdb.Close()
 	}

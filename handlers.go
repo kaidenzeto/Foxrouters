@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -431,7 +432,9 @@ func handleDeleteAccount(grokAM *GrokAccountManager) gin.HandlerFunc {
 		}
 		// Remove from Redis
 		if grokAM.db != nil && grokAM.db.rdb != nil {
-			grokAM.db.rdb.Del(c, "grok:account:"+email)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			grokAM.db.rdb.Del(ctx, "grok:account:"+email)
 		}
 		// Remove from runtime pool
 		grokAM.mu.Lock()

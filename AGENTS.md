@@ -29,7 +29,7 @@ Client → AuthMiddleware (Bearer) → RateLimitMiddleware
 | Layer | Engine | Purpose |
 |-------|--------|---------|
 | Hot | **Redis** | Tokens, CB credits, disabled flags, gateway keys, rate state |
-| Cold | **ClickHouse** (`127.0.0.1:9001`) | `request_logs` full request/response JSON, refresh/events, 90d TTL |
+| Cold | **ClickHouse** (`127.0.0.1:9000`) | `request_logs` full request/response JSON, refresh/events, 90d TTL |
 | Legacy | PostgreSQL | **Not used** by gateway for history (may remain on disk) |
 
 ### Hot-path rules (do not regress)
@@ -66,7 +66,7 @@ Client → AuthMiddleware (Bearer) → RateLimitMiddleware
 ## Env (essentials)
 ```
 REDIS_ADDR / REDIS_PASSWORD / REDIS_DB
-CLICKHOUSE_ADDR=127.0.0.1:9001
+CLICKHOUSE_ADDR=127.0.0.1:9000
 CLICKHOUSE_DB=gateway
 GATEWAY_KEY_FILE / CB_KEY_FILE
 PORT=20130

@@ -131,7 +131,9 @@ func main() {
 	}
 
 	cbKM := NewCBKeyManager(db)
-	cbKM.LoadFromRedis()
+	if err := cbKM.LoadFromRedis(); err != nil {
+		log.Printf("[cb] warn: LoadFromRedis: %v (starting with 0 keys)", err)
+	}
 
 	// Health checker: active + passive monitoring with circuit breaker
 	hc := newHealthChecker(grokAM, cbKM)

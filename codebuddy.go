@@ -45,9 +45,12 @@ func NewCBKeyManager(db *DBStore) *CBKeyManager {
 // LoadFromRedis loads all CB keys from Redis (single source of truth).
 // If Redis is empty (fresh deploy), falls back to file/env as bootstrap seed,
 // then persists those keys to Redis so subsequent starts are file-independent.
-func (km *CBKeyManager) LoadFromRedis() {
+func (km *CBKeyManager) LoadFromRedis() error {
 	// Step 1: Try loading all keys + state from Redis
-	redisState, _ := km.db.LoadCBKeys()
+	redisState, err := km.db.LoadCBKeys()
+	if err != nil {
+		return fmt.Errorf("cb keys load: %w", err)
+	}
 
 	if len(redisState) > 0 {
 		// Redis has keys — use as single source of truth
@@ -75,14 +78,10 @@ func (km *CBKeyManager) LoadFromRedis() {
 					key.disabledAt = time.Time{}
 				}
 			}
-			if key.creditsUsed >= CB_CREDIT_LIMIT {
-				key.disabled = true
-				key.disabledAt = time.Time{}
-			}
 			km.keys = append(km.keys, key)
 		}
 		log.Printf("[cb] loaded %d keys from Redis", len(km.keys))
-		return
+		return nil
 	}
 
 	// Step 2: Redis empty — bootstrap from file/env (first run only)
@@ -103,7 +102,7 @@ func (km *CBKeyManager) LoadFromRedis() {
 	}
 	if keysStr == "" {
 		log.Printf("[cb] no API keys found (Redis empty, no file/env bootstrap)")
-		return
+		return nil
 	}
 
 	// Seed: parse keys, persist to Redis so future starts are file-independent
@@ -124,6 +123,7 @@ func (km *CBKeyManager) LoadFromRedis() {
 		seedCount++
 	}
 	log.Printf("[cb] bootstrapped %d keys from file/env → Redis (first run)", seedCount)
+	return nil
 }
 
 func (km *CBKeyManager) Next() (*CBKey, error) {
@@ -411,12 +411,20 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 			resp.Body.Close()
 			key.mu.Lock()
 			key.disabled = true
-			key.disabledAt = time.Time{}
+			if resp.StatusCode == 401 {
+				key.disabledAt = time.Time{} // permanent — key invalid
+			} else {
+				key.disabledAt = time.Now() // cooldown 10m — rate limited
+			}
 			key.mu.Unlock()
 			if key.db != nil {
 				key.db.SaveCBKey(key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 			}
-			log.Printf("[cb] key %s...%s disabled (%d)", key.Key[:8], key.Key[len(key.Key)-4:], resp.StatusCode)
+			if resp.StatusCode == 401 {
+				log.Printf("[cb] key %s...%s disabled (401 unauthorized, permanent)", key.Key[:8], key.Key[len(key.Key)-4:])
+			} else {
+				log.Printf("[cb] key %s...%s disabled (429 rate limited, cooldown 10m)", key.Key[:8], key.Key[len(key.Key)-4:])
+			}
 			continue
 		}
 
