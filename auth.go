@@ -4,7 +4,6 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
