@@ -47,4 +47,10 @@ var (
 	handleListAliases       = handlers.HandleListAliases
 	handleAddAlias          = handlers.HandleAddAlias
 	handleDeleteAlias       = handlers.HandleDeleteAlias
+
+	// v1.4.0 — combos
+	handleListCombos  = handlers.HandleListCombos
+	handleGetCombo    = handlers.HandleGetCombo
+	handleAddCombo    = handlers.HandleAddCombo
+	handleDeleteCombo = handlers.HandleDeleteCombo
 )

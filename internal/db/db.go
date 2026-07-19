@@ -42,6 +42,8 @@ const (
 	// single well-known key — field = id, value = JSON config or target.
 	RK_CUSTOM_MODELS  = "custom_models"  // HASH field=model_id value=CustomModel JSON
 	RK_CUSTOM_ALIASES = "custom_aliases" // HASH field=alias      value=target model_id
+	RK_COMBOS         = "combos"         // HASH field=combo_name value=Combo JSON (v1.4.0)
+	RK_COMBO_COUNTER  = "combo:counter:" // STRING prefix, atomic INCR for round-robin
 
 	LOG_BUFFER_SIZE    = 10000
 	LOG_FLUSH_INTERVAL = 2 * time.Second
@@ -1155,6 +1157,97 @@ func (s *Store) DeleteCustomAlias(alias string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	return s.rdb.HDel(ctx, RK_CUSTOM_ALIASES, alias).Err()
+}
+
+// ============================================================================
+// REDIS — Combos (v1.4.0)
+// ============================================================================
+
+// Combo groups multiple models under a single logical name with a routing
+// strategy applied per request. Callers reference the combo as
+// "combo/<name>" — see ComboRegistry.Resolve.
+//
+//   Strategy "fallback"    — try models in order; on upstream failure the
+//                            proxy falls through to the next entry (see the
+//                            fallback retry loop in proxy.ProxyRequest).
+//   Strategy "round_robin" — atomic INCR of combo:counter:<name> selects the
+//                            next model modulo len(Models) per request.
+type Combo struct {
+	Name        string   `json:"name"`
+	Strategy    string   `json:"strategy"`    // "fallback" | "round_robin"
+	Models      []string `json:"models"`      // ordered list of model IDs
+	Description string   `json:"description"` // optional
+}
+
+// LoadCombos returns every persisted combo keyed by name.
+func (s *Store) LoadCombos() (map[string]Combo, error) {
+	out := map[string]Combo{}
+	if s == nil || s.rdb == nil {
+		return out, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	vals, err := s.rdb.HGetAll(ctx, RK_COMBOS).Result()
+	if err != nil {
+		return out, err
+	}
+	for name, raw := range vals {
+		var cb Combo
+		if err := json.Unmarshal([]byte(raw), &cb); err != nil {
+			slog.Warn("bad combos entry", "module", "db-redis", "name", name, "error", err)
+			continue
+		}
+		// Backfill Name if missing (older writes / migrations).
+		if cb.Name == "" {
+			cb.Name = name
+		}
+		out[name] = cb
+	}
+	return out, nil
+}
+
+// SaveCombo stores one combo (upsert).
+func (s *Store) SaveCombo(c Combo) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	if c.Name == "" {
+		return fmt.Errorf("combo name required")
+	}
+	blob, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return s.rdb.HSet(ctx, RK_COMBOS, c.Name, string(blob)).Err()
+}
+
+// DeleteCombo removes one combo entry and its round-robin counter.
+func (s *Store) DeleteCombo(name string) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// Best-effort delete both keys.
+	if err := s.rdb.HDel(ctx, RK_COMBOS, name).Err(); err != nil {
+		return err
+	}
+	_ = s.rdb.Del(ctx, RK_COMBO_COUNTER+name).Err()
+	return nil
+}
+
+// IncrComboCounter atomically increments the round-robin counter for the
+// given combo and returns the new value. The caller applies modulo over the
+// combo's model list length.
+func (s *Store) IncrComboCounter(name string) (int64, error) {
+	if s == nil || s.rdb == nil {
+		return 0, fmt.Errorf("redis not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return s.rdb.Incr(ctx, RK_COMBO_COUNTER+name).Result()
 }
 
 // Close gracefully shuts down DB connections.

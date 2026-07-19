@@ -8,6 +8,62 @@ Policy: **test (`go test -race`) before build/restart**. Secrets only via `.gate
 
 ---
 
+## v1.4.0 — Combos (fallback + round-robin strategies) (2026-07-19)
+
+### What changed
+
+| Area | Before | After |
+|------|--------|-------|
+| Multi-model routing | One model per request | + **combos**: `combo/<name>` groups N models under one virtual alias |
+| Reliability | Retry within a single upstream | + **fallback strategy**: try `models[0]`, on 5xx buffer response + retry `models[1]`, `models[2]`, … up to list end |
+| Load-spreading | Manual per-request model choice | + **round_robin strategy**: atomic `INCR combo:counter:<name>` rotates models across requests (cluster-safe) |
+| Model catalog | Hardcoded + custom models | + combos appear in `/v1/models` as `combo/<name>` with `owned_by: foxrouters` |
+| Dashboard | 5 pages | + **Combos** page (`#/combos`, admin) — create form + table with delete |
+
+### New endpoints (admin-only, Bearer auth)
+
+- `GET  /api/combos` — list every combo
+- `POST /api/combos` — `{name, strategy, models[], description?}` (strategy: `fallback` | `round_robin`)
+- `GET  /api/combos/*name` — fetch one combo
+- `DELETE /api/combos/*name` — remove combo + its round-robin counter
+
+### Example
+
+```bash
+# Create a Fallback combo (GPT-5.5 → Claude → Grok-4.5)
+curl -X POST http://127.0.0.1:20130/api/combos \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{"name":"smart-fallback","strategy":"fallback",
+       "models":["cb/gpt-5.5","cb/claude-sonnet-4.6","grok-4.5"],
+       "description":"GPT then Claude then Grok"}'
+
+# Call it — client sees the concrete backend response, retries are transparent
+curl -X POST http://127.0.0.1:20130/v1/chat/completions \
+  -H "Authorization: Bearer $CLIENT_KEY" -H "content-type: application/json" \
+  -d '{"model":"combo/smart-fallback","messages":[{"role":"user","content":"hi"}]}'
+```
+
+### Redis schema
+
+- `combos` HASH — `field=<name>`, `value=Combo JSON`
+- `combo:counter:<name>` STRING — atomic INCR for round-robin (auto-deleted on combo delete)
+
+### Implementation notes
+
+- Fallback retry is non-streaming-only: streaming requests use `models[0]` (once bytes hit the wire we can't un-send). SSE clients keep the head-of-list model without retry.
+- 4xx responses aren't retried (client error, not upstream). Only 5xx walks the chain.
+- Resolution order: custom-alias → combo → grok-alias → default prefix routing.
+- Combos of aliases work: the retry loop re-runs `CustomRegistry.Resolve` on each candidate so alias-of-model in a combo still resolves correctly.
+
+### Files
+
+- New: `internal/proxy/combo.go`, `internal/proxy/buffered_writer.go`, `internal/handlers/combos.go`, `combo_test.go`
+- Modified: `internal/db/db.go` (Combo type + Load/Save/Delete/IncrCounter), `internal/proxy/proxy.go` (combo resolution + fallback retry loop), `main.go` (registry init + 4 routes), adapters, `dashboard.html` (nav + page + JS)
+
+**Tests:** 62 total (52 pre-existing + 10 new). `go vet ./...` clean, `go test -count=1 -race` green.
+
+---
+
 ## v1.3.0 — Custom Models + Aliases (runtime-configurable) (2026-07-19)
 
 ### What changed

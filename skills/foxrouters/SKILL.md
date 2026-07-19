@@ -286,6 +286,61 @@ Aliases and custom models live in Redis HASHes `custom_aliases` and
 `custom_models`; the process caches them in memory behind a `sync.RWMutex` and
 refreshes the map on every mutation.
 
+### 7. Combos (admin only, v1.4.0)
+
+Group multiple models under one virtual `combo/<name>` alias with a routing
+strategy applied per request. Two strategies: **fallback** (try in order,
+retry next on 5xx) and **round_robin** (rotate models across requests via
+atomic Redis INCR).
+
+```bash
+# List combos
+curl -s http://127.0.0.1:20130/api/combos -H "Authorization: Bearer $ADMIN_KEY"
+# → {"combos":[{"name":"smart-fallback","strategy":"fallback","models":[…]}]}
+
+# Create a Fallback combo (retry chain on 5xx)
+curl -s -X POST http://127.0.0.1:20130/api/combos \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{"name":"smart-fallback","strategy":"fallback",
+       "models":["cb/gpt-5.5","cb/claude-sonnet-4.6","grok-4.5"],
+       "description":"GPT then Claude then Grok"}'
+# → {"ok":true,"name":"smart-fallback"}
+
+# Create a Round Robin combo
+curl -s -X POST http://127.0.0.1:20130/api/combos \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{"name":"rr-pool","strategy":"round_robin",
+       "models":["cb/gpt-5.5","cb/claude-sonnet-4.6"]}'
+
+# Use — client calls combo/<name>, gets whichever backend model
+curl -s -X POST http://127.0.0.1:20130/v1/chat/completions \
+  -H "Authorization: Bearer $CLIENT_KEY" -H "content-type: application/json" \
+  -d '{"model":"combo/smart-fallback","messages":[{"role":"user","content":"hi"}]}'
+
+# Fetch one
+curl -s http://127.0.0.1:20130/api/combos/smart-fallback -H "Authorization: Bearer $ADMIN_KEY"
+
+# Delete (also removes the round-robin counter key)
+curl -s -X DELETE http://127.0.0.1:20130/api/combos/smart-fallback -H "Authorization: Bearer $ADMIN_KEY"
+```
+
+**Resolve order** (inside `proxy.ProxyRequest`):
+1. Custom alias (single hop)
+2. Custom-model lookup on resolved id
+3. **Combo resolve** — if `combo/<name>`, replace with next model per strategy
+4. Grok-alias expansion (`grok-4.5-high` → `grok-4.5` + `reasoning_effort`)
+5. Fall through to prefix routing (`grok-*` / `cb/*`)
+
+**Fallback semantics**
+- Only retries on 5xx. 4xx returns immediately (client error).
+- Non-streaming only — SSE bytes on the wire can't be un-sent, so streaming clients use `models[0]` without retry.
+
+**Round-robin semantics**
+- `INCR combo:counter:<name>` on every request; model = `models[counter % len]`.
+- Cluster-safe atomic — no lock contention.
+
+Combos live in Redis HASH `combos` (field=name, value=JSON) plus `combo:counter:<name>` STRING keys.
+
 ## Python Helper
 
 ```python

@@ -22,6 +22,7 @@ type ModelStats = db.ModelStats
 type RecentRequest = db.RecentRequest
 type RequestDetail = db.RequestDetail
 type CustomModel = db.CustomModel
+type Combo = db.Combo
 
 // Re-exported constants some domain files still reference by short name.
 const (

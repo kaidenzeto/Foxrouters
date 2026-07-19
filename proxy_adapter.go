@@ -15,3 +15,9 @@ type CustomRegistry = proxy.CustomRegistry
 
 // NewCustomRegistry preserves the constructor name in package main.
 var NewCustomRegistry = proxy.NewCustomRegistry
+
+// v1.4.0 — combos registry.
+type ComboRegistry = proxy.ComboRegistry
+
+// NewComboRegistry preserves the constructor name in package main.
+var NewComboRegistry = proxy.NewComboRegistry

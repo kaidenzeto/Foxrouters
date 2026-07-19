@@ -129,6 +129,12 @@ func main() {
 		slog.Warn("custom registry Load failed, starting empty", "module", "custom", "error", err)
 	}
 
+	// Combos registry (v1.4.0). Redis-backed, cached in memory.
+	comboReg := NewComboRegistry(db)
+	if err := comboReg.Load(); err != nil {
+		slog.Warn("combo registry Load failed, starting empty", "module", "combo", "error", err)
+	}
+
 	go autoRefreshWorker(grokAM)
 	go reenableWorker(grokAM)
 	go reenableCBWorker(cbKM)
@@ -219,6 +225,13 @@ func main() {
 	r.POST("/api/aliases", adminAuth, handleAddAlias(customReg))
 	r.DELETE("/api/aliases/*alias", adminAuth, handleDeleteAlias(customReg))
 
+	// Combos (v1.4.0) — admin only. Combos group models under a virtual
+	// "combo/<name>" alias with a strategy (fallback | round_robin).
+	r.GET("/api/combos", adminAuth, handleListCombos(comboReg))
+	r.POST("/api/combos", adminAuth, handleAddCombo(comboReg))
+	r.GET("/api/combos/*name", adminAuth, handleGetCombo(comboReg))
+	r.DELETE("/api/combos/*name", adminAuth, handleDeleteCombo(comboReg))
+
 	// /v1/*path catch-all — gin's httprouter doesn't allow a static
 	// /v1/messages segment alongside /v1/*path, so we dispatch the
 	// Anthropic Messages API adapter from inside the catch-all (POST only).
@@ -226,10 +239,10 @@ func main() {
 	// anthropicAuthMiddleware (rewrites x-api-key → Authorization: Bearer).
 	r.Any("/v1/*path", func(c *gin.Context) {
 		if c.Request.URL.Path == "/v1/messages" && c.Request.Method == http.MethodPost {
-			handleMessages(grokAM, cbKM, hc, authMgr, customReg)(c)
+			handleMessages(grokAM, cbKM, hc, authMgr, customReg, comboReg)(c)
 			return
 		}
-		proxyRequest(grokAM, cbKM, hc, authMgr, customReg)(c)
+		proxyRequest(grokAM, cbKM, hc, authMgr, customReg, comboReg)(c)
 	})
 
 	r.GET("/", func(c *gin.Context) {

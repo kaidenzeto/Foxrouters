@@ -230,6 +230,10 @@ Roles: **inference** may call `/v1/*` only; **admin** may call everything.
 | `GET`  | `/api/aliases` | admin | List model aliases. |
 | `POST` | `/api/aliases` | admin | Create alias: `{alias, target}` (e.g. `my-claude` → `cb/claude-sonnet-4.6`). |
 | `DELETE` | `/api/aliases/:alias` | admin | Delete an alias. |
+| `GET`  | `/api/combos` | admin | List combos (v1.4.0). |
+| `POST` | `/api/combos` | admin | Create combo: `{name, strategy, models[], description?}` — strategy is `fallback` or `round_robin`. |
+| `GET`  | `/api/combos/*name` | admin | Fetch one combo. |
+| `DELETE` | `/api/combos/*name` | admin | Delete combo + its round-robin counter. |
 
 ### Example: chat completion
 
@@ -305,6 +309,52 @@ curl -s -X DELETE http://127.0.0.1:20130/api/models/custom/cb/kimi-k3 \
 Aliases are checked **before** the default `grok-*` / `cb/*` routing, so they
 also work for the Anthropic Messages API — `mapAnthropicModel` consults
 aliases first.
+
+### Example: combos (v1.4.0)
+
+Group multiple models under a virtual `combo/<name>` alias with automatic
+failover or load-spreading:
+
+```bash
+ADMIN_KEY=<your-admin-gateway-key>
+CLIENT_KEY=<any-gateway-key>
+
+# 1. Create a Fallback combo — tries models in order, retries next on 5xx
+curl -s -X POST http://127.0.0.1:20130/api/combos \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{"name":"smart-fallback","strategy":"fallback",
+       "models":["cb/gpt-5.5","cb/claude-sonnet-4.6","grok-4.5"],
+       "description":"GPT then Claude then Grok"}'
+
+# 2. Create a Round Robin combo — rotates models across requests
+curl -s -X POST http://127.0.0.1:20130/api/combos \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{"name":"rr-pool","strategy":"round_robin",
+       "models":["cb/gpt-5.5","cb/claude-sonnet-4.6"]}'
+
+# 3. Use them — client just calls combo/<name>
+curl -s -X POST http://127.0.0.1:20130/v1/chat/completions \
+  -H "Authorization: Bearer $CLIENT_KEY" -H "content-type: application/json" \
+  -d '{"model":"combo/smart-fallback","messages":[{"role":"user","content":"hi"}]}'
+
+# 4. Combos appear in /v1/models
+curl -s http://127.0.0.1:20130/v1/models -H "Authorization: Bearer $CLIENT_KEY" \
+  | jq '.data[] | select(.id | startswith("combo/"))'
+
+# 5. Cleanup
+curl -s -X DELETE http://127.0.0.1:20130/api/combos/smart-fallback \
+  -H "Authorization: Bearer $ADMIN_KEY"
+curl -s -X DELETE http://127.0.0.1:20130/api/combos/rr-pool \
+  -H "Authorization: Bearer $ADMIN_KEY"
+```
+
+**Fallback semantics**
+- Non-streaming: on 5xx from `models[i]`, response is buffered + discarded, next model tried. 4xx returns immediately (client error).
+- Streaming (SSE): head-of-list model only — bytes already on the wire can't be retried.
+
+**Round-robin semantics**
+- Atomic `INCR combo:counter:<name>` (Redis) — cluster-safe fair rotation.
+- Counter is auto-deleted when the combo is deleted.
 
 ---
 
