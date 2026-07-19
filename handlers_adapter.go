@@ -36,4 +36,6 @@ var (
 	handleDashboard        = handlers.HandleDashboard
 	handleLogin            = handlers.HandleLogin
 	handleLogout           = handlers.HandleLogout
+	handleMessages         = handlers.HandleMessages
+	anthropicAuthMiddleware = handlers.AnthropicAuthMiddleware
 )

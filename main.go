@@ -144,6 +144,9 @@ func main() {
 	r.Use(ratelimit.RequestIDMiddleware())
 	r.Use(ratelimit.SecurityHeadersMiddleware())
 	r.Use(ratelimit.GzipMiddleware())
+	// Anthropic /v1/messages: normalise x-api-key → Authorization: Bearer
+	// BEFORE the main AuthMiddleware validates it.
+	r.Use(anthropicAuthMiddleware())
 	r.Use(AuthMiddleware(authMgr))
 	r.Use(ratelimit.Middleware(rateLimiter, authMgr))
 
@@ -197,7 +200,18 @@ func main() {
 	r.GET("/history", adminAuth, handleHistory(db))
 	r.GET("/history/recent", adminAuth, handleRecentRequests(db))
 	r.GET("/history/detail/:id", adminAuth, handleHistoryDetail(db))
-	r.Any("/v1/*path", proxyRequest(grokAM, cbKM, hc, authMgr))
+	// /v1/*path catch-all — gin's httprouter doesn't allow a static
+	// /v1/messages segment alongside /v1/*path, so we dispatch the
+	// Anthropic Messages API adapter from inside the catch-all (POST only).
+	// Auth is handled by the global AuthMiddleware (Bearer) +
+	// anthropicAuthMiddleware (rewrites x-api-key → Authorization: Bearer).
+	r.Any("/v1/*path", func(c *gin.Context) {
+		if c.Request.URL.Path == "/v1/messages" && c.Request.Method == http.MethodPost {
+			handleMessages(grokAM, cbKM, hc, authMgr)(c)
+			return
+		}
+		proxyRequest(grokAM, cbKM, hc, authMgr)(c)
+	})
 
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{

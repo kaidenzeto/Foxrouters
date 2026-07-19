@@ -120,6 +120,9 @@ func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 				{"id": "grok-4-fast-reasoning", "object": "model", "owned_by": "xai"},
 				{"id": "grok-code-fast-1", "object": "model", "owned_by": "xai"},
 				// CodeBuddy — GPT
+				{"id": "cb/gpt-5.6-sol", "object": "model", "owned_by": "codebuddy"},
+				{"id": "cb/gpt-5.6-terra", "object": "model", "owned_by": "codebuddy"},
+				{"id": "cb/gpt-5.6-luna", "object": "model", "owned_by": "codebuddy"},
 				{"id": "cb/gpt-5.5", "object": "model", "owned_by": "codebuddy"},
 				{"id": "cb/gpt-5.4", "object": "model", "owned_by": "codebuddy"},
 				{"id": "cb/gpt-5.2", "object": "model", "owned_by": "codebuddy"},
