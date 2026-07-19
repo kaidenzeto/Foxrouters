@@ -133,6 +133,8 @@ curl -X PUT http://127.0.0.1:20130/api/keys/gw-abc... \
 | POST | `/accounts/import/bulk` | Add multiple Grok accounts |
 | POST | `/accounts/refresh` | Trigger token refresh for all accounts |
 | DELETE | `/accounts/:email` | Delete a Grok account |
+| DELETE | `/cb/keys/:key` | Delete a CodeBuddy key |
+| POST | `/cleanup/disabled?type=all\|grok\|cb` | Bulk-remove permanently disabled keys/accounts |
 
 **Add single account:**
 ```bash

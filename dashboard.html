@@ -1084,14 +1084,16 @@ body {
           <div style="margin-left:auto;display:flex;gap:6px">
             <button class="btn-ghost" id="cbAddBtn" onclick="showAddCBModal()" style="padding:5px 12px;font-size:12px">+ Add Key</button>
             <button class="btn-ghost" id="cbBulkBtn" onclick="showBulkCBModal()" style="padding:5px 12px;font-size:12px">Bulk Import</button>
+            <button class="btn-ghost" id="cbCleanupBtn" onclick="cleanupDisabled('cb')" style="padding:5px 12px;font-size:12px;color:var(--danger)">Cleanup Disabled</button>
             <button class="btn-ghost" id="grokAddBtn" onclick="showAddGrokModal()" style="padding:5px 12px;font-size:12px;display:none">+ Add Account</button>
             <button class="btn-ghost" id="grokBulkBtn" onclick="showBulkGrokModal()" style="padding:5px 12px;font-size:12px;display:none">Bulk Import</button>
+            <button class="btn-ghost" id="grokCleanupBtn" onclick="cleanupDisabled('grok')" style="padding:5px 12px;font-size:12px;color:var(--danger);display:none">Cleanup Disabled</button>
           </div>
         </div>
         <div id="cbPanel" class="tbl-scroll" style="max-height:500px">
           <table class="tbl">
             <thead><tr>
-              <th>Key</th><th>Credits</th><th>Usage</th><th>Requests</th><th>Status</th>
+              <th>Key</th><th>Credits</th><th>Usage</th><th>Requests</th><th>Status</th><th>Actions</th>
             </tr></thead>
             <tbody id="cbBody"></tbody>
           </table>
@@ -1101,7 +1103,7 @@ body {
           <div class="tbl-scroll" style="max-height:500px">
             <table class="tbl">
               <thead><tr>
-                <th>Email</th><th>Token Status</th><th>Expires At</th><th>Last Refresh</th><th>Disabled At</th>
+                <th>Email</th><th>Token Status</th><th>Expires At</th><th>Last Refresh</th><th>Disabled At</th><th>Actions</th>
               </tr></thead>
               <tbody id="grokBody"></tbody>
             </table>
@@ -1507,9 +1509,10 @@ function renderGrokPage() {
       '<td class="muted" style="font-size:11px">' + expAt + '</td>' +
       '<td class="muted" style="font-size:11px">' + lastRef + '</td>' +
       '<td class="muted" style="font-size:11px">' + disAt + '</td>' +
+      '<td><button class="btn-ghost" onclick="deleteGrokAccount(\'' + escHtml(a.email) + '\')" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
     '</tr>';
   }
-  document.getElementById('grokBody').innerHTML = gRows || '<tr><td colspan="5" class="history-empty">No Grok accounts loaded</td></tr>';
+  document.getElementById('grokBody').innerHTML = gRows || '<tr><td colspan="6" class="history-empty">No Grok accounts loaded</td></tr>';
 
   // Pager
   var pager = document.getElementById('grokPager');
@@ -1576,9 +1579,10 @@ function renderCBPage() {
       '<td><div class="pbar"><div class="pbar-fill ' + color + '" style="width:' + pct + '%"></div></div>' + (k.credit_limit - k.credits_used).toFixed(1) + ' left</td>' +
       '<td class="mono">' + k.total_requests + '</td>' +
       '<td>' + status + '</td>' +
+      '<td><button class="btn-ghost" onclick="deleteCBKey(\'' + escHtml(k.key) + '\')" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
     '</tr>';
   }
-  document.getElementById('cbBody').innerHTML = cbRows || '<tr><td colspan="5" class="history-empty">No CodeBuddy keys loaded</td></tr>';
+  document.getElementById('cbBody').innerHTML = cbRows || '<tr><td colspan="6" class="history-empty">No CodeBuddy keys loaded</td></tr>';
 
   // Pager
   var pager = document.getElementById('cbPager');
@@ -2308,6 +2312,46 @@ function deleteKey(masked) {
     loadGatewayKeys();
   }).catch(function(e) {
     alert('Delete failed: ' + e.message);
+  });
+}
+
+function deleteCBKey(key) {
+  if (!confirm('Delete CodeBuddy key ' + key + '? This cannot be undone.')) return;
+  apiFetch('/cb/keys/' + encodeURIComponent(key), {
+    method: 'DELETE'
+  }).then(function() {
+    refresh();
+    loadCBStats();
+  }).catch(function(e) {
+    alert('Delete failed: ' + e.message);
+  });
+}
+
+function deleteGrokAccount(email) {
+  if (!confirm('Delete Grok account ' + email + '? This cannot be undone.')) return;
+  apiFetch('/accounts/' + encodeURIComponent(email), {
+    method: 'DELETE'
+  }).then(function() {
+    refresh();
+  }).catch(function(e) {
+    alert('Delete failed: ' + e.message);
+  });
+}
+
+function cleanupDisabled(type) {
+  var label = type === 'grok' ? 'Grok accounts' : (type === 'cb' ? 'CodeBuddy keys' : 'disabled items');
+  if (!confirm('Permanently delete all disabled ' + label + '? Cooldown keys are preserved. This cannot be undone.')) return;
+  apiFetch('/cleanup/disabled?type=' + type, {
+    method: 'POST'
+  }).then(function(data) {
+    var msg = '';
+    if (type === 'grok' || type === 'all') msg += 'Grok removed: ' + (data.grok_removed || 0) + ', remaining: ' + (data.grok_remaining || 0) + '\n';
+    if (type === 'cb' || type === 'all') msg += 'CB removed: ' + (data.cb_removed || 0) + ', remaining: ' + (data.cb_remaining || 0);
+    alert(msg);
+    refresh();
+    loadCBStats();
+  }).catch(function(e) {
+    alert('Cleanup failed: ' + e.message);
   });
 }
 

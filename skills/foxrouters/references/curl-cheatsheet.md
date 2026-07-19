@@ -110,8 +110,24 @@ curl -X POST $GW/cb/import/bulk -H "$AUTH" -d '{"api_keys":["ck_1","ck_2","ck_3"
 # Bulk add (raw paste)
 curl -X POST $GW/cb/import/bulk -H "$AUTH" -d '{"raw":"ck_1\nck_2,ck_3"}'
 
+# Delete single CB key
+curl -X DELETE $GW/cb/keys/ck_testkey -H "$AUTH"
+
 # CB stats (credits, usage per key)
 curl -s $GW/cb-stats -H "$AUTH"
+```
+
+## Cleanup Disabled Keys/Accounts
+
+```bash
+# Remove all permanently disabled (grok + cb) — cooldown keys preserved
+curl -X POST "$GW/cleanup/disabled?type=all" -H "$AUTH"
+
+# Grok accounts only
+curl -X POST "$GW/cleanup/disabled?type=grok" -H "$AUTH"
+
+# CodeBuddy keys only
+curl -X POST "$GW/cleanup/disabled?type=cb" -H "$AUTH"
 ```
 
 ## Health & History

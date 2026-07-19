@@ -212,6 +212,8 @@ Roles: **inference** may call `/v1/*` only; **admin** may call everything.
 | `GET`  | `/accounts` | admin | List Grok accounts + CB keys with status. |
 | `POST` | `/accounts/import` | admin | Import a Grok account credential JSON. |
 | `POST` | `/cb/import` | admin | Import a CodeBuddy key. |
+| `DELETE` | `/cb/keys/:key` | admin | Delete a CodeBuddy key. |
+| `POST` | `/cleanup/disabled` | admin | Bulk-remove permanently disabled keys/accounts (`?type=all\|grok\|cb`). |
 | `GET`  | `/cb-stats` | admin | CodeBuddy per-key credit / usage stats. |
 | `GET`  | `/api/keys` | admin | List gateway API keys. |
 | `POST` | `/api/keys` | admin | Create a gateway key (role, allowed_models, RPM, burst, quota). |
