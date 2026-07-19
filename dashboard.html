@@ -937,10 +937,6 @@ body {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
       Models
     </button>
-    <button class="nav-item" data-route="#/custom" onclick="navigateTo('#/custom')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      Custom Models
-    </button>
   </nav>
   <div class="sidebar-footer">
     <div class="status-row">
@@ -1165,6 +1161,7 @@ body {
     <div class="page" id="page-models">
       <div style="display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid var(--border-strong)">
         <button id="mtab-models" onclick="switchMTab('models')" style="padding:10px 18px;background:none;border:none;border-bottom:2px solid var(--brand);color:var(--text-primary);font-size:13px;font-weight:500;cursor:pointer">Models</button>
+        <button id="mtab-custom" onclick="switchMTab('custom')" style="padding:10px 18px;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-tertiary);font-size:13px;font-weight:500;cursor:pointer">Custom</button>
         <button id="mtab-combos" onclick="switchMTab('combos')" style="padding:10px 18px;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-tertiary);font-size:13px;font-weight:500;cursor:pointer">Combos</button>
       </div>
 
@@ -1255,8 +1252,7 @@ body {
       </div>
     </div>
 
-    <!-- ════════ PAGE 5: CUSTOM MODELS & ALIASES (admin) ════════ -->
-    <div class="page" id="page-custom">
+      <div id="mtab-pane-custom" style="display:none">
       <!-- Custom Models -->
       <div class="panel" style="margin-bottom:20px">
         <div class="panel-head">
@@ -1343,9 +1339,9 @@ body {
           </table>
         </div>
       </div>
+      </div>
     </div>
 
-    <!-- ════════ PAGE 6: COMBOS (admin, v1.4.0) ════════ -->
     <!-- Key Modal -->
     <div class="modal-overlay" id="keyModal" onclick="if(event.target===this)closeKeyModal()">
       <div class="modal-box" style="max-width:480px">
@@ -1502,8 +1498,7 @@ var routes = {
   '#/':         { page: 'page-dashboard', title: 'Dashboard',   meta: 'Live · auto-refresh 5s' },
   '#/accounts': { page: 'page-accounts',  title: 'Accounts & Keys', meta: 'Live · auto-refresh 5s' },
   '#/keys':     { page: 'page-keys',      title: 'Gateway API Keys', meta: 'Redis-backed · CRUD' },
-  '#/models':   { page: 'page-models',    title: 'Models', meta: 'Usage stats · aliases' },
-  '#/custom':   { page: 'page-custom',    title: 'Custom Models & Aliases', meta: 'Runtime-configurable · Redis-backed' }
+  '#/models':   { page: 'page-models',    title: 'Models', meta: 'Usage stats · aliases · custom · combos' }
 };
 
 function navigateTo(hash) {
@@ -1535,10 +1530,6 @@ function router() {
   }
   if (hash === '#/models') {
     loadModels();
-  }
-  if (hash === '#/custom') {
-    loadCustomModels();
-    loadAliases();
   }
 }
 
@@ -2142,7 +2133,7 @@ var aliasMap = {
 };
 
 function switchMTab(tab) {
-  var panes = ['models', 'combos'];
+  var panes = ['models', 'custom', 'combos'];
   panes.forEach(function(t) {
     var pane = document.getElementById('mtab-pane-' + t);
     var btn = document.getElementById('mtab-' + t);
@@ -2157,6 +2148,10 @@ function switchMTab(tab) {
       btn.style.color = 'var(--text-tertiary)';
     }
   });
+  if (tab === 'custom') {
+    loadCustomModels();
+    loadAliases();
+  }
   if (tab === 'combos') {
     loadCombos();
     loadComboModelSelector();
