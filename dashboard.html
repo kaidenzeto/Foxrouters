@@ -2310,12 +2310,15 @@ function modelCaps(id) {
     caps.push('<span title="Image input" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(100,181,246,0.14);color:#64b5f6;font-weight:600;letter-spacing:0.3px">👁 Vision</span>');
   }
 
-  // Reasoning (extended thinking)
+  // Reasoning (extended thinking — verified via reasoning_tokens in usage)
+  // Almost all modern models support reasoning_effort param. gpt-4.1 rejects it.
   if (m.indexOf('o3') >= 0 || m.indexOf('o4') >= 0 ||
       m.indexOf('grok-4') >= 0 ||
       m.indexOf('-reasoning') >= 0 || m.indexOf('deepseek') >= 0 ||
-      m.indexOf('claude-opus') >= 0 || m.indexOf('kimi') >= 0) {
-    caps.push('<span title="Chain-of-thought reasoning" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(171,71,188,0.14);color:#ab47bc;font-weight:600;letter-spacing:0.3px">🧠 Reasoning</span>');
+      m.indexOf('claude-opus') >= 0 || m.indexOf('kimi') >= 0 ||
+      m.indexOf('gpt-5') >= 0 || m.indexOf('glm-5') >= 0 ||
+      m.indexOf('gemini-3') >= 0) {
+    caps.push('<span title="Chain-of-thought reasoning (reasoning_effort param)" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(171,71,188,0.14);color:#ab47bc;font-weight:600;letter-spacing:0.3px">🧠 Reasoning</span>');
   }
 
   // Code (specialized coding models)
