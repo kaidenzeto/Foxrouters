@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -80,7 +80,7 @@ func (km *CBKeyManager) LoadFromRedis() error {
 			}
 			km.keys = append(km.keys, key)
 		}
-		log.Printf("[cb] loaded %d keys from Redis", len(km.keys))
+		slog.Info("loaded keys from Redis", "module", "cb", "count", len(km.keys))
 		return nil
 	}
 
@@ -101,7 +101,7 @@ func (km *CBKeyManager) LoadFromRedis() error {
 		}
 	}
 	if keysStr == "" {
-		log.Printf("[cb] no API keys found (Redis empty, no file/env bootstrap)")
+		slog.Warn("no API keys found (Redis empty, no file/env bootstrap)", "module", "cb")
 		return nil
 	}
 
@@ -122,7 +122,7 @@ func (km *CBKeyManager) LoadFromRedis() error {
 		}
 		seedCount++
 	}
-	log.Printf("[cb] bootstrapped %d keys from file/env → Redis (first run)", seedCount)
+	slog.Info("bootstrapped keys from file/env → Redis (first run)", "module", "cb", "count", seedCount)
 	return nil
 }
 
@@ -207,7 +207,7 @@ func (km *CBKeyManager) reenableCooldowns() {
 		if key.db != nil {
 			key.db.SaveCBKey(key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 		}
-		log.Printf("[cb] re-enabled cooldown key %s...%s", key.Key[:8], key.Key[len(key.Key)-4:])
+		slog.Info("re-enabled cooldown key", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
 	}
 }
 
@@ -231,8 +231,11 @@ func (k *CBKey) AddCredits(c float64) {
 	if k.creditsUsed >= CB_CREDIT_LIMIT {
 		k.disabled = true
 		k.disabledAt = time.Time{} // permanent until reset
-		log.Printf("[cb] key %s...%s disabled (credits used: %.2f / %d)",
-			k.Key[:8], k.Key[len(k.Key)-4:], k.creditsUsed, int(CB_CREDIT_LIMIT))
+		slog.Warn("key disabled (credits used)",
+			"module", "cb",
+			"key", k.Key[:8]+"..."+k.Key[len(k.Key)-4:],
+			"credits_used", k.creditsUsed,
+			"credit_limit", CB_CREDIT_LIMIT)
 	}
 	// Snapshot for persistence — save outside lock (Redis I/O must not hold k.mu)
 	key := k.Key
@@ -421,9 +424,9 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 				key.db.SaveCBKey(key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 			}
 			if resp.StatusCode == 401 {
-				log.Printf("[cb] key %s...%s disabled (401 unauthorized, permanent)", key.Key[:8], key.Key[len(key.Key)-4:])
+				slog.Warn("key disabled (401 unauthorized, permanent)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
 			} else {
-				log.Printf("[cb] key %s...%s disabled (429 rate limited, cooldown 10m)", key.Key[:8], key.Key[len(key.Key)-4:])
+				slog.Warn("key disabled (429 rate limited, cooldown 10m)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
 			}
 			continue
 		}
@@ -442,7 +445,7 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 				if key.db != nil {
 					key.db.SaveCBKey(key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 				}
-				log.Printf("[cb] key %s...%s disabled (credits exhausted, code 14018)", key.Key[:8], key.Key[len(key.Key)-4:])
+				slog.Warn("key disabled (credits exhausted, code 14018)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
 				continue
 			}
 			// 400 with invalid_request_parameters = client error, NOT key problem.
@@ -475,7 +478,7 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 			if key.db != nil {
 				key.db.SaveCBKey(key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 			}
-			log.Printf("[cb] key %s...%s disabled (4xx: %d, body: %s)", key.Key[:8], key.Key[len(key.Key)-4:], resp.StatusCode, truncateLog(bodyStr, 200))
+			slog.Warn("key disabled (4xx)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:], "status", resp.StatusCode, "body", truncateLog(bodyStr, 200))
 			continue
 		}
 
@@ -544,7 +547,7 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 								if lastKey.db != nil {
 									lastKey.db.SaveCBKey(lastKey.Key, lastKey.creditsUsed, lastKey.totalReqs, lastKey.disabled, lastKey.disabledAt)
 								}
-								log.Printf("[cb] key %s...%s disabled (credits exhausted in stream)", lastKey.Key[:8], lastKey.Key[len(lastKey.Key)-4:])
+								slog.Warn("key disabled (credits exhausted in stream)", "module", "cb", "key", lastKey.Key[:8]+"..."+lastKey.Key[len(lastKey.Key)-4:])
 							}
 						}
 						if sc.Usage != nil {

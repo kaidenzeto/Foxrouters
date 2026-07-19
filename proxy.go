@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -229,11 +230,21 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 		}
 
 		startTime := time.Now()
+		upstream := "codebuddy"
 		if isGrokModel(model) {
+			upstream = "grok"
 			proxyGrok(c, body, grokAM, clientStream, hc, model)
 		} else {
 			proxyCodeBuddy(c, body, bodyMap, cbKM, clientStream, hc)
 		}
+
+		// Record Prometheus metrics for this proxied request. Bucket status by
+		// 3-digit HTTP code (200, 429, 500). Duration in seconds for the
+		// standard histogram buckets. Cheap: label lookups + atomic increments.
+		elapsed := time.Since(startTime).Seconds()
+		status := strconv.Itoa(c.Writer.Status())
+		requestsTotal.WithLabelValues(upstream, status).Inc()
+		requestDuration.WithLabelValues(upstream).Observe(elapsed)
 
 		// Per-key token quota tracking
 		fullKey = c.GetString("client_key")

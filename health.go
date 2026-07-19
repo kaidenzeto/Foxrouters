@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -85,7 +85,8 @@ func (h *UpstreamHealth) RecordRequest(latency time.Duration, err error) {
 		if h.consecutiveErrs >= CB_OPEN_THRESHOLD && h.state == CircuitClosed {
 			h.state = CircuitOpen
 			h.openedAt = time.Now()
-			log.Printf("[health] %s circuit OPENED (%d consecutive errors)", h.Name, h.consecutiveErrs)
+			slog.Warn("circuit OPENED (consecutive errors)", "module", "health", "upstream", h.Name, "errors", h.consecutiveErrs)
+			setCircuitState(h.Name, h.state)
 		}
 		h.mu.Unlock()
 	} else {
@@ -95,7 +96,8 @@ func (h *UpstreamHealth) RecordRequest(latency time.Duration, err error) {
 			h.state = CircuitClosed
 			h.consecutiveErrs = 0
 			h.halfOpenProbes = 0
-			log.Printf("[health] %s circuit CLOSED (probe succeeded)", h.Name)
+			slog.Info("circuit CLOSED (probe succeeded)", "module", "health", "upstream", h.Name)
+			setCircuitState(h.Name, h.state)
 		} else if h.state == CircuitClosed {
 			h.consecutiveErrs = 0
 		}
@@ -117,7 +119,8 @@ func (h *UpstreamHealth) CanRequest() bool {
 		if time.Since(h.openedAt) >= CB_OPEN_DURATION {
 			h.state = CircuitHalfOpen
 			h.halfOpenProbes = 0
-			log.Printf("[health] %s circuit HALF-OPEN (testing)", h.Name)
+			slog.Info("circuit HALF-OPEN (testing)", "module", "health", "upstream", h.Name)
+			setCircuitState(h.Name, h.state)
 			return true
 		}
 		return false
@@ -197,7 +200,7 @@ func newHealthChecker(grokAM *GrokAccountManager, cbKM *CBKeyManager) *HealthChe
 func (hc *HealthChecker) Start() {
 	go hc.grokCheckLoop()
 	go hc.cbCheckLoop()
-	log.Printf("[health] active health checker started (interval=%s)", HEALTH_CHECK_INTERVAL)
+	slog.Info("active health checker started", "module", "health", "interval", HEALTH_CHECK_INTERVAL.String())
 }
 
 func (hc *HealthChecker) grokCheckLoop() {
@@ -234,7 +237,7 @@ func (hc *HealthChecker) checkGrok() {
 		if h.consecutiveErrs >= CB_OPEN_THRESHOLD && h.state == CircuitClosed {
 			h.state = CircuitOpen
 			h.openedAt = time.Now()
-			log.Printf("[health] grok circuit OPENED (no accounts)")
+			slog.Warn("circuit OPENED (no accounts)", "module", "health", "upstream", "grok")
 		}
 		h.mu.Unlock()
 		return
@@ -282,7 +285,7 @@ func (hc *HealthChecker) checkGrok() {
 		if h.consecutiveErrs >= CB_OPEN_THRESHOLD && h.state == CircuitClosed {
 			h.state = CircuitOpen
 			h.openedAt = time.Now()
-			log.Printf("[health] grok circuit OPENED (LLM test failed: %v)", err)
+			slog.Warn("circuit OPENED (LLM test failed)", "module", "health", "upstream", "grok", "error", err)
 		}
 	} else {
 		resp.Body.Close()
@@ -294,7 +297,7 @@ func (hc *HealthChecker) checkGrok() {
 			if h.state == CircuitHalfOpen {
 				h.state = CircuitClosed
 				h.consecutiveErrs = 0
-				log.Printf("[health] grok circuit CLOSED (LLM test OK, %dms)", latency.Milliseconds())
+				slog.Info("circuit CLOSED (LLM test OK)", "module", "health", "upstream", "grok", "latency_ms", latency.Milliseconds())
 			} else if h.state == CircuitClosed {
 				h.consecutiveErrs = 0
 			}
@@ -304,7 +307,7 @@ func (hc *HealthChecker) checkGrok() {
 			if h.consecutiveErrs >= CB_OPEN_THRESHOLD && h.state == CircuitClosed {
 				h.state = CircuitOpen
 				h.openedAt = time.Now()
-				log.Printf("[health] grok circuit OPENED (LLM test status %d)", resp.StatusCode)
+				slog.Warn("circuit OPENED (LLM test status)", "module", "health", "upstream", "grok", "status", resp.StatusCode)
 			}
 		}
 	}
@@ -327,7 +330,7 @@ func (hc *HealthChecker) checkCB() {
 		if h.consecutiveErrs >= CB_OPEN_THRESHOLD && h.state == CircuitClosed {
 			h.state = CircuitOpen
 			h.openedAt = time.Now()
-			log.Printf("[health] codebuddy circuit OPENED (no keys)")
+			slog.Warn("circuit OPENED (no keys)", "module", "health", "upstream", "codebuddy")
 		}
 		h.mu.Unlock()
 		return
@@ -374,7 +377,7 @@ func (hc *HealthChecker) checkCB() {
 		if h.consecutiveErrs >= CB_OPEN_THRESHOLD && h.state == CircuitClosed {
 			h.state = CircuitOpen
 			h.openedAt = time.Now()
-			log.Printf("[health] codebuddy circuit OPENED (LLM test failed: %v)", err)
+			slog.Warn("circuit OPENED (LLM test failed)", "module", "health", "upstream", "codebuddy", "error", err)
 		}
 	} else {
 		resp.Body.Close()
@@ -385,7 +388,7 @@ func (hc *HealthChecker) checkCB() {
 			if h.state == CircuitHalfOpen {
 				h.state = CircuitClosed
 				h.consecutiveErrs = 0
-				log.Printf("[health] codebuddy circuit CLOSED (LLM test OK, %dms)", latency.Milliseconds())
+				slog.Info("circuit CLOSED (LLM test OK)", "module", "health", "upstream", "codebuddy", "latency_ms", latency.Milliseconds())
 			} else if h.state == CircuitClosed {
 				h.consecutiveErrs = 0
 			}
@@ -395,7 +398,7 @@ func (hc *HealthChecker) checkCB() {
 			if h.consecutiveErrs >= CB_OPEN_THRESHOLD && h.state == CircuitClosed {
 				h.state = CircuitOpen
 				h.openedAt = time.Now()
-				log.Printf("[health] codebuddy circuit OPENED (LLM test status %d)", resp.StatusCode)
+				slog.Warn("circuit OPENED (LLM test status)", "module", "health", "upstream", "codebuddy", "status", resp.StatusCode)
 			}
 		}
 	}

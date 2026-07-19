@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -70,7 +70,7 @@ func (a *GrokAccount) refreshLocked() error {
 	rt := a.RefreshToken
 	a.mu.Unlock()
 
-	log.Printf("[grok-refresh] %s refreshing...", email)
+	slog.Debug("refreshing", "module", "grok-refresh", "email", email)
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"client_id":     {XAI_CLIENT_ID},
@@ -120,7 +120,7 @@ func (a *GrokAccount) refreshLocked() error {
 	expIn := a.ExpiresIn
 	a.mu.Unlock()
 
-	log.Printf("[grok-refresh] %s ok, expires %ds", email, expIn)
+	slog.Info("refresh ok", "module", "grok-refresh", "email", email, "expires_in_s", expIn)
 	// Persist outside lock (singleflight guarantees one writer per email)
 	if a.db != nil {
 		a.db.SaveGrokAccount(a)
@@ -221,7 +221,7 @@ func (am *GrokAccountManager) LoadFromRedis() error {
 		}
 		am.accounts = append(am.accounts, acc)
 	}
-	log.Printf("[grok] loaded %d accounts from Redis", len(am.accounts))
+	slog.Info("loaded accounts from Redis", "module", "grok", "count", len(am.accounts))
 	return nil
 }
 
@@ -301,7 +301,7 @@ func (am *GrokAccountManager) reenableCooldowns() {
 		if acc.db != nil {
 			acc.db.SaveGrokAccount(acc)
 		}
-		log.Printf("[grok] re-enabled cooldown account %s", acc.Email)
+		slog.Info("re-enabled cooldown account", "module", "grok", "email", acc.Email)
 	}
 }
 
@@ -352,9 +352,9 @@ func autoRefreshWorker(am *GrokAccountManager) {
 						if acc.db != nil {
 							acc.db.SaveGrokAccount(acc)
 						}
-						log.Printf("[worker] %s revoked, disabled", acc.Email)
+						slog.Warn("account revoked, disabled", "module", "grok-worker", "email", acc.Email)
 					} else {
-						log.Printf("[worker] %s refresh error: %v", acc.Email, err)
+						slog.Warn("refresh error", "module", "grok-worker", "email", acc.Email, "error", err)
 					}
 				}
 			}(a)
@@ -457,7 +457,7 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 		req.Header = headers
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("[grok] attempt %d/%d %s network: %v", attempt+1, total, acc.Email, err)
+			slog.Warn("network attempt failed", "module", "grok", "attempt", attempt+1, "total", total, "email", acc.Email, "error", err)
 			continue
 		}
 
@@ -487,10 +487,10 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 				strings.Contains(bodyStr, "suspended") ||
 				strings.Contains(bodyStr, "permanently") {
 				acc.disabledAt = time.Time{}
-				log.Printf("[grok] %s 403 PERMANENT BAN: %s", acc.Email, truncateLog(bodyStr, 200))
+				slog.Warn("403 permanent ban", "module", "grok", "email", acc.Email, "body", truncateLog(bodyStr, 200))
 			} else {
 				acc.disabledAt = time.Now()
-				log.Printf("[grok] %s 403 cooldown: %s", acc.Email, truncateLog(bodyStr, 200))
+				slog.Warn("403 cooldown", "module", "grok", "email", acc.Email, "body", truncateLog(bodyStr, 200))
 			}
 			acc.mu.Unlock()
 			if acc.db != nil {
@@ -502,7 +502,7 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
 			hc.grok.RecordRequest(time.Since(reqStart), fmt.Errorf("upstream %d", resp.StatusCode))
-			log.Printf("[grok] %s upstream %d", acc.Email, resp.StatusCode)
+			slog.Warn("upstream error", "module", "grok", "email", acc.Email, "status", resp.StatusCode)
 			continue
 		}
 

@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,19 +22,41 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 //go:embed dashboard.html
 var dashboardHTML string
 
+// init wires the stdlib slog default handler. LOG_LEVEL=debug (or DEBUG)
+// enables verbose output; default is info. TextHandler keeps the output
+// grep-friendly (journalctl-compatible), roughly matching log.Printf lines.
+func init() {
+	level := slog.LevelInfo
+	switch os.Getenv("LOG_LEVEL") {
+	case "debug", "DEBUG":
+		level = slog.LevelDebug
+	case "warn", "WARN":
+		level = slog.LevelWarn
+	case "error", "ERROR":
+		level = slog.LevelError
+	}
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	slog.SetDefault(slog.New(handler))
+	// Route stdlib "log" package through slog too, so third-party code
+	// (gin.Default's default logger, etc.) shows up in the same stream.
+	log.SetFlags(0)
+}
+
 // ============================================================================
 // CONFIG
 // ============================================================================
 
-const (
-	// Version is the single source of truth for /health, /, and logs.
-	Version = "5.11.2"
+// Version is the single source of truth for /health, /, and logs.
+// Injected at build time via -ldflags "-X main.Version=<tag>", fallback "dev".
+var Version = "dev"
 
+const (
 	XAI_CLIENT_ID    = "b1a00492-073a-47ea-816f-4c329264a828"
 	XAI_TOKEN_URL    = "https://auth.x.ai/oauth2/token"
 	XAI_UPSTREAM_URL = "https://cli-chat-proxy.grok.com/v1"
@@ -121,18 +144,19 @@ func main() {
 	// Initialize Redis + ClickHouse
 	db, err := NewDBStore()
 	if err != nil {
-		log.Fatalf("[fatal] DB init: %v", err)
+		slog.Error("DB init failed", "module", "main", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	grokAM := NewGrokAccountManager(db)
 	if err := grokAM.LoadFromRedis(); err != nil {
-		log.Printf("[grok] warn: LoadFromRedis: %v (starting with 0 accounts)", err)
+		slog.Warn("LoadFromRedis failed, starting empty", "module", "grok", "error", err)
 	}
 
 	cbKM := NewCBKeyManager(db)
 	if err := cbKM.LoadFromRedis(); err != nil {
-		log.Printf("[cb] warn: LoadFromRedis: %v (starting with 0 keys)", err)
+		slog.Warn("LoadFromRedis failed, starting empty", "module", "cb", "error", err)
 	}
 
 	// Health checker: active + passive monitoring with circuit breaker
@@ -147,6 +171,17 @@ func main() {
 	go autoRefreshWorker(grokAM)
 	go reenableWorker(grokAM)
 	go reenableCBWorker(cbKM)
+	// Snapshot pool sizes into Prometheus gauges every 10s. Cheap RLock walk;
+	// keeps activeKeys/disabledKeys eventually consistent without touching the
+	// hot path. Circuit-state gauges are updated inline from health.go.
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		updatePoolGauges(grokAM, cbKM, authMgr) // prime once
+		for range t.C {
+			updatePoolGauges(grokAM, cbKM, authMgr)
+		}
+	}()
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
@@ -172,6 +207,9 @@ func main() {
 	r.GET("/logout", handleLogout())
 	r.GET("/health", handleHealth(grokAM, cbKM, hc, authMgr))
 	r.HEAD("/health", handleHealthMinimal())
+	// Prometheus scrape endpoint — public, no auth (scraper isolation is
+	// upstream's responsibility, e.g. a firewall / private network scrape).
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	// Accounts/keys/history — admin only (inference keys must not see other tenants' data)
 	r.GET("/accounts", adminAuth, handleAccounts(grokAM, cbKM))
 	r.GET("/cb-stats", adminAuth, func(c *gin.Context) {
@@ -227,8 +265,13 @@ func main() {
 		})
 	})
 
-	log.Printf("[server] foxrouters %s on :%s (grok: %d accs, cb: %d keys, auth: %s, db: redis+ch)",
-		Version, port, grokAM.Len(), cbKM.Len(), func() string {
+	slog.Info("foxrouters started",
+		"module", "server",
+		"version", Version,
+		"port", port,
+		"grok_accounts", grokAM.Len(),
+		"cb_keys", cbKM.Len(),
+		"auth", func() string {
 			authMgr.mu.RLock()
 			n := len(authMgr.keys)
 			authMgr.mu.RUnlock()
@@ -236,8 +279,9 @@ func main() {
 				return fmt.Sprintf("%d keys", n)
 			}
 			return "disabled"
-		}())
-	log.Printf("[server] dashboard: http://localhost:%s/dashboard", port)
+		}(),
+		"db", "redis+ch")
+	slog.Info("dashboard ready", "module", "server", "url", fmt.Sprintf("http://localhost:%s/dashboard", port))
 
 	// Graceful shutdown: drain in-flight requests, flush async DB logs.
 	// Timeouts: ReadHeaderTimeout protects against Slowloris; WriteTimeout
@@ -254,20 +298,21 @@ func main() {
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("[fatal] %v", err)
+			slog.Error("server fatal", "module", "server", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
-	log.Printf("[server] shutdown signal: %v — draining...", sig)
+	slog.Info("shutdown signal received, draining", "module", "server", "signal", sig.String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("[server] shutdown error: %v", err)
+		slog.Error("shutdown error", "module", "server", "error", err)
 	}
 	// db.Close() runs via defer — drains async log channels best-effort
-	log.Printf("[server] stopped")
+	slog.Info("stopped", "module", "server")
 }

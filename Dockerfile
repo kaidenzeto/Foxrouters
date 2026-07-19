@@ -8,6 +8,10 @@
 # -----------------------------------------------------------------------------
 FROM golang:1.25-alpine AS builder
 
+# VERSION is injected into main.Version via -ldflags. Pass via
+# `docker build --build-arg VERSION=v1.2.3 .` or the CI workflow.
+ARG VERSION=dev
+
 WORKDIR /build
 
 # Cache module downloads separately from source changes.
@@ -19,7 +23,8 @@ COPY . .
 
 # CGO_ENABLED=0 → fully static binary, safe to drop into scratch/alpine.
 # -ldflags "-s -w" strips debug/symbol tables (~30% smaller).
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o foxrouters .
+# -X main.Version stamps the release tag into the binary.
+RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.Version=${VERSION}" -o foxrouters .
 
 # -----------------------------------------------------------------------------
 # Stage 2: runtime

@@ -3,9 +3,11 @@
 # Go binary
 GO ?= go
 BINARY = foxrouters
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS = -s -w -X main.Version=$(VERSION)
 
 build:
-	$(GO) build -ldflags="-s -w" -o $(BINARY) .
+	$(GO) build -ldflags="$(LDFLAGS)" -o $(BINARY) .
 
 test:
 	$(GO) test -count=1 -race -timeout 120s ./...

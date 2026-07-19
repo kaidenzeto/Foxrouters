@@ -4,7 +4,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,7 +88,8 @@ func generateRandomKey(n int) string {
 	b := make([]byte, n)
 	if _, err := cryptorand.Read(b); err != nil {
 		// crypto/rand failure is unrecoverable — never use a deterministic fallback
-		log.Fatalf("[auth] CRITICAL: crypto/rand.Read failed: %v", err)
+		slog.Error("crypto/rand.Read failed (fatal)", "module", "auth", "error", err)
+		os.Exit(1)
 	}
 	return hex.EncodeToString(b)
 }
@@ -109,9 +110,9 @@ func newAuthManager(db *DBStore) *AuthManager {
 			for _, info := range redisKeys {
 				am.keys[info.Key] = info
 			}
-			log.Printf("[auth] loaded %d keys from Redis", len(redisKeys))
+			slog.Info("loaded keys from Redis", "module", "auth", "count", len(redisKeys))
 		} else if err != nil {
-			log.Printf("[auth] warn: Redis load keys: %v", err)
+			slog.Warn("Redis load keys failed", "module", "auth", "error", err)
 		}
 	}
 
@@ -165,15 +166,15 @@ func newAuthManager(db *DBStore) *AuthManager {
 			}
 		}
 		if len(bootstrapKeys) > 0 {
-			log.Printf("[auth] bootstrapped %d keys from file/env → Redis (first run)", len(bootstrapKeys))
+			slog.Info("bootstrapped keys from file/env → Redis (first run)", "module", "auth", "count", len(bootstrapKeys))
 		}
 	}
 
 	if len(am.keys) == 0 {
 		if os.Getenv("GATEWAY_AUTH_DISABLE") == "1" {
-			log.Printf("[auth] WARNING: no gateway API keys loaded — auth DISABLED (GATEWAY_AUTH_DISABLE=1)")
+			slog.Warn("no gateway API keys loaded — auth DISABLED (GATEWAY_AUTH_DISABLE=1)", "module", "auth")
 		} else if os.Getenv("GATEWAY_NO_AUTOBOOTSTRAP") == "1" {
-			log.Printf("[auth] WARNING: no gateway API keys loaded — fail-closed mode (auto-bootstrap disabled via GATEWAY_NO_AUTOBOOTSTRAP=1)")
+			slog.Warn("no gateway API keys loaded — fail-closed mode (auto-bootstrap disabled)", "module", "auth")
 		} else {
 			// Auto-bootstrap: generate a random admin key on first boot,
 			// persist to Redis, print to log ONCE, write to bootstrap-key.txt.
@@ -204,21 +205,20 @@ func newAuthManager(db *DBStore) *AuthManager {
 				bootstrapFile = absPath
 			}
 			if err := os.WriteFile(bootstrapFile, []byte(bootstrapKey+"\n"), 0600); err != nil {
-				log.Printf("[auth] WARNING: failed to write bootstrap key file: %v", err)
+				slog.Warn("failed to write bootstrap key file", "module", "auth", "error", err)
 			}
-			log.Printf("╔══════════════════════════════════════════════════════════════╗")
-			log.Printf("║  [auth] AUTO-BOOTSTRAP: generated admin key (first boot)     ║")
-			log.Printf("║  Key: %s", bootstrapKey)
-			log.Printf("║  Saved to: %s (chmod 600 — delete after first login)", bootstrapFile)
 			port := os.Getenv("PORT")
 			if port == "" {
 				port = "20130"
 			}
-			log.Printf("║  Login at: http://localhost:%s/login", port)
-			log.Printf("╚══════════════════════════════════════════════════════════════╝")
+			slog.Info("AUTO-BOOTSTRAP: generated admin key (first boot)",
+				"module", "auth",
+				"key", bootstrapKey,
+				"file", bootstrapFile,
+				"login_url", "http://localhost:"+port+"/login")
 		}
 	} else {
-		log.Printf("[auth] loaded %d gateway API keys", len(am.keys))
+		slog.Info("loaded gateway API keys", "module", "auth", "count", len(am.keys))
 	}
 
 	return am
@@ -346,7 +346,11 @@ func (am *AuthManager) IncrementTokens(key string, amount int64) {
 	// Auto-disable if quota exceeded
 	if info.TokenQuota > 0 && info.TokensUsed >= info.TokenQuota {
 		info.Disabled = true
-		log.Printf("[auth] key %s auto-disabled (quota: %d/%d)", maskKey(key), info.TokensUsed, info.TokenQuota)
+		slog.Warn("key auto-disabled (quota exceeded)",
+			"module", "auth",
+			"key", maskKey(key),
+			"tokens_used", info.TokensUsed,
+			"token_quota", info.TokenQuota)
 	}
 	am.mu.Unlock()
 	if am.db != nil {
@@ -378,7 +382,8 @@ func generateGatewayKey() string {
 	b := make([]byte, 24) // 24 bytes → 32 base64 chars
 	if _, err := cryptorand.Read(b); err != nil {
 		// crypto/rand failure is unrecoverable — never use a predictable fallback
-		log.Fatalf("[auth] CRITICAL: crypto/rand.Read failed: %v", err)
+		slog.Error("crypto/rand.Read failed (fatal)", "module", "auth", "error", err)
+		os.Exit(1)
 	}
 	// URL-safe base64, strip padding
 	encoded := base64.RawURLEncoding.EncodeToString(b)
@@ -444,7 +449,7 @@ func AuthMiddleware(am *AuthManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Skip auth for public endpoints
 		path := c.Request.URL.Path
-		if path == "/health" || path == "/" || path == "/dashboard" || path == "/login" || path == "/logout" {
+		if path == "/health" || path == "/" || path == "/dashboard" || path == "/login" || path == "/logout" || path == "/metrics" {
 			c.Next()
 			return
 		}

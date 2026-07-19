@@ -9,7 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
@@ -209,7 +209,7 @@ func NewDBStore() (*DBStore, error) {
 
 	// Ensure schema exists (idempotent)
 	if err := s.ensureClickHouseSchema(ctx); err != nil {
-		log.Printf("[db:ch] warn: ensure schema: %v", err)
+		slog.Warn("ensure schema failed", "module", "db-ch", "error", err)
 	}
 
 	// Start async log consumers
@@ -218,7 +218,7 @@ func NewDBStore() (*DBStore, error) {
 	go s.consumeRefreshLogs()
 	go s.consumeAccountEvents()
 
-	log.Printf("[db] Redis connected %s, ClickHouse connected %s/%s", rAddr, chAddr, chDB)
+	slog.Info("Redis + ClickHouse connected", "module", "db", "redis", rAddr, "ch_addr", chAddr, "ch_db", chDB)
 	return s, nil
 }
 
@@ -314,7 +314,7 @@ func (s *DBStore) SaveGrokAccount(acc *GrokAccount) {
 	}
 	key := RK_GROK_ACCOUNT + acc.Email
 	if err := s.rdb.HSet(ctx, key, data).Err(); err != nil {
-		log.Printf("[db:redis] warn: HSet %s: %v", key, err)
+		slog.Warn("HSet failed", "module", "db-redis", "key", key, "error", err)
 	}
 }
 
@@ -362,7 +362,7 @@ func (s *DBStore) SaveCBKey(key string, creditsUsed float64, totalReqs int64, di
 	}
 	rk := RK_CB_KEY + key
 	if err := s.rdb.HSet(ctx, rk, data).Err(); err != nil {
-		log.Printf("[db:redis] warn: HSet %s: %v", rk, err)
+		slog.Warn("HSet failed", "module", "db-redis", "key", rk, "error", err)
 	}
 }
 
@@ -413,7 +413,7 @@ func (s *DBStore) SaveGatewayKey(info *GatewayKeyInfo) {
 	}
 	rk := RK_GATEWAY_KEY + info.Key
 	if err := s.rdb.HSet(ctx, rk, data).Err(); err != nil {
-		log.Printf("[db:redis] warn: HSet %s: %v", rk, err)
+		slog.Warn("HSet failed", "module", "db-redis", "key", rk, "error", err)
 	}
 }
 
@@ -452,7 +452,7 @@ func (s *DBStore) DeleteGatewayKey(key string) {
 	defer cancel()
 	rk := RK_GATEWAY_KEY + key
 	if err := s.rdb.Del(ctx, rk).Err(); err != nil {
-		log.Printf("[db:redis] warn: DEL %s: %v", rk, err)
+		slog.Warn("DEL failed", "module", "db-redis", "key", rk, "error", err)
 	}
 }
 
@@ -465,7 +465,7 @@ func (s *DBStore) IncrementGatewayKeyTokens(key string, amount int64) {
 	defer cancel()
 	rk := RK_GATEWAY_KEY + key
 	if err := s.rdb.HIncrBy(ctx, rk, "tokens_used", amount).Err(); err != nil {
-		log.Printf("[db:redis] warn: HINCRBY %s tokens_used: %v", rk, err)
+		slog.Warn("HINCRBY tokens_used failed", "module", "db-redis", "key", rk, "error", err)
 	}
 }
 
@@ -478,7 +478,7 @@ func (s *DBStore) IncrementGatewayKeyRequests(key string) {
 	defer cancel()
 	rk := RK_GATEWAY_KEY + key
 	if err := s.rdb.HIncrBy(ctx, rk, "requests", 1).Err(); err != nil {
-		log.Printf("[db:redis] warn: HINCRBY %s requests: %v", rk, err)
+		slog.Warn("HINCRBY requests failed", "module", "db-redis", "key", rk, "error", err)
 	}
 }
 
@@ -551,7 +551,7 @@ func (s *DBStore) LogRequest(r RequestLog) {
 	select {
 	case s.reqLogCh <- r:
 	default:
-		log.Printf("[db:ch] warn: request log buffer full, dropping entry")
+		slog.Warn("request log buffer full, dropping entry", "module", "db-ch")
 	}
 }
 
@@ -562,7 +562,7 @@ func (s *DBStore) LogRefresh(r RefreshLog) {
 	select {
 	case s.refreshCh <- r:
 	default:
-		log.Printf("[db:ch] warn: refresh log buffer full, dropping entry")
+		slog.Warn("refresh log buffer full, dropping entry", "module", "db-ch")
 	}
 }
 
@@ -573,7 +573,7 @@ func (s *DBStore) LogEvent(e AccountEvent) {
 	select {
 	case s.eventCh <- e:
 	default:
-		log.Printf("[db:ch] warn: event buffer full, dropping entry")
+		slog.Warn("event buffer full, dropping entry", "module", "db-ch")
 	}
 }
 
@@ -604,7 +604,7 @@ func (s *DBStore) consumeRequestLogs() {
 			input_text, output_text, request_body, response_body
 		)`)
 		if err != nil {
-			log.Printf("[db:ch] reqlog prepare: %v", err)
+			slog.Error("reqlog prepare", "module", "db-ch", "error", err)
 			batch = batch[:0]
 			return
 		}
@@ -631,11 +631,11 @@ func (s *DBStore) consumeRequestLogs() {
 				bodyString(r.RequestBody),
 				bodyString(r.ResponseBody),
 			); err != nil {
-				log.Printf("[db:ch] reqlog append: %v", err)
+				slog.Error("reqlog append", "module", "db-ch", "error", err)
 			}
 		}
 		if err := batchSQL.Send(); err != nil {
-			log.Printf("[db:ch] reqlog send: %v", err)
+			slog.Error("reqlog send", "module", "db-ch", "error", err)
 		}
 		batch = batch[:0]
 	}
@@ -929,7 +929,7 @@ func (s *DBStore) GetRecentRequests(limit int) ([]RecentRequest, error) {
 		if err := rows.Scan(&id, &ts, &r.ClientKey, &r.Model, &r.Upstream,
 			&r.AccountID, &sc, &lat, &tin, &tout, &r.ErrorMsg,
 			&r.InputText, &r.OutputText); err != nil {
-			log.Printf("[db:ch] recent scan: %v", err)
+			slog.Error("recent scan", "module", "db-ch", "error", err)
 			continue
 		}
 		r.ID = strconv.FormatUint(id, 10)
@@ -941,7 +941,7 @@ func (s *DBStore) GetRecentRequests(limit int) ([]RecentRequest, error) {
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("[db:ch] recent requests iteration: %v", err)
+		slog.Error("recent requests iteration", "module", "db-ch", "error", err)
 	}
 	return out, nil
 }
@@ -1016,7 +1016,7 @@ func (s *DBStore) Close() {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		log.Printf("[db] warning: consumer drain timed out after 10s")
+		slog.Warn("consumer drain timed out", "module", "db", "timeout", "10s")
 	}
 	if s.rdb != nil {
 		_ = s.rdb.Close()

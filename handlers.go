@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -150,7 +150,7 @@ func handleRefresh(grokAM *GrokAccountManager) gin.HandlerFunc {
 			status := "ok"
 			if err != nil {
 				// Sanitize: don't leak upstream OAuth/internal details to client
-				log.Printf("[grok] refresh %s failed: %v", a.Email, err)
+				slog.Warn("refresh failed", "module", "grok", "email", a.Email, "error", err)
 				status = "refresh_failed"
 			}
 			results = append(results, gin.H{"email": a.Email, "status": status})
@@ -185,7 +185,7 @@ func handleImportCBKey(cbKM *CBKeyManager) gin.HandlerFunc {
 			display = display[:8] + "..." + display[len(display)-4:]
 		}
 		if added {
-			log.Printf("[cb] imported key %s (total: %d)", display, total)
+			slog.Info("imported key", "module", "cb", "key", display, "total", total)
 		}
 		c.JSON(200, gin.H{
 			"added":  added,
@@ -267,7 +267,7 @@ func handleImportAccount(grokAM *GrokAccountManager) gin.HandlerFunc {
 		}
 		total := len(grokAM.accounts)
 		grokAM.mu.Unlock()
-		log.Printf("[grok] imported account %s (total: %d)", req.Email, total)
+		slog.Info("imported account", "module", "grok", "email", req.Email, "total", total)
 		c.JSON(200, gin.H{
 			"status":  "imported",
 			"email":   req.Email,
@@ -319,7 +319,7 @@ func handleImportCBKeyBulk(cbKM *CBKeyManager) gin.HandlerFunc {
 				skipped++
 			}
 		}
-		log.Printf("[cb] bulk import: %d added, %d skipped (total: %d)", added, skipped, cbKM.Len())
+		slog.Info("bulk import", "module", "cb", "added", added, "skipped", skipped, "total", cbKM.Len())
 		c.JSON(200, gin.H{
 			"added":   added,
 			"skipped": skipped,
@@ -412,7 +412,7 @@ func handleImportAccountBulk(grokAM *GrokAccountManager) gin.HandlerFunc {
 				added++
 			}
 		}
-		log.Printf("[grok] bulk import: %d added, %d updated, %d failed (total: %d)", added, updated, failed, grokAM.Len())
+		slog.Info("bulk import", "module", "grok", "added", added, "updated", updated, "failed", failed, "total", grokAM.Len())
 		c.JSON(200, gin.H{
 			"added":   added,
 			"updated": updated,
@@ -446,7 +446,7 @@ func handleDeleteAccount(grokAM *GrokAccountManager) gin.HandlerFunc {
 		}
 		remaining := len(grokAM.accounts)
 		grokAM.mu.Unlock()
-		log.Printf("[grok] deleted account %s (remaining: %d)", email, remaining)
+		slog.Info("deleted account", "module", "grok", "email", email, "remaining", remaining)
 		c.JSON(200, gin.H{"status": "deleted", "email": email, "remaining": remaining})
 	}
 }
@@ -467,13 +467,13 @@ func handleHistory(db *DBStore) gin.HandlerFunc {
 
 		stats, err := db.GetRequestStats(since)
 		if err != nil {
-			log.Printf("[handler] internal error: %v", err); c.JSON(500, gin.H{"error": "internal server error"})
+			slog.Error("internal error", "module", "handler", "error", err); c.JSON(500, gin.H{"error": "internal server error"})
 			return
 		}
 
 		modelStats, err := db.GetModelStats(since, 20)
 		if err != nil {
-			log.Printf("[handler] internal error: %v", err); c.JSON(500, gin.H{"error": "internal server error"})
+			slog.Error("internal error", "module", "handler", "error", err); c.JSON(500, gin.H{"error": "internal server error"})
 			return
 		}
 
@@ -502,7 +502,7 @@ func handleRecentRequests(db *DBStore) gin.HandlerFunc {
 		}
 		logs, err := db.GetRecentRequests(limit)
 		if err != nil {
-			log.Printf("[handler] internal error: %v", err); c.JSON(500, gin.H{"error": "internal server error"})
+			slog.Error("internal error", "module", "handler", "error", err); c.JSON(500, gin.H{"error": "internal server error"})
 			return
 		}
 		c.JSON(200, gin.H{"recent_requests": logs, "count": len(logs)})
@@ -589,8 +589,15 @@ func handleCreateKey(am *AuthManager) gin.HandlerFunc {
 		}
 		key := generateGatewayKey()
 		info := am.AddWithRole(key, req.Name, req.Role, req.AllowedModels, req.RPM, req.Burst, req.TokenQuota)
-		log.Printf("[auth] created key %s (name=%s, role=%s, models=%v, rpm=%d, burst=%d, quota=%d)",
-			maskKey(key), req.Name, req.Role, req.AllowedModels, req.RPM, req.Burst, req.TokenQuota)
+		slog.Info("created key",
+			"module", "auth",
+			"key", maskKey(key),
+			"name", req.Name,
+			"role", string(req.Role),
+			"models", req.AllowedModels,
+			"rpm", req.RPM,
+			"burst", req.Burst,
+			"quota", req.TokenQuota)
 		c.JSON(201, gin.H{
 			"key":            info.Key,
 			"key_masked":     maskKey(info.Key),
@@ -619,7 +626,7 @@ func handleDeleteKey(am *AuthManager) gin.HandlerFunc {
 			return
 		}
 		am.Remove(fullKey)
-		log.Printf("[auth] deleted key %s", maskKey(fullKey))
+		slog.Info("deleted key", "module", "auth", "key", maskKey(fullKey))
 		c.JSON(200, gin.H{"deleted": maskKey(fullKey)})
 	}
 }
@@ -686,7 +693,7 @@ func handleUpdateKey(am *AuthManager) gin.HandlerFunc {
 			return
 		}
 		info := am.Get(fullKey)
-		log.Printf("[auth] updated key %s", maskKey(fullKey))
+		slog.Info("updated key", "module", "auth", "key", maskKey(fullKey))
 		c.JSON(200, gin.H{
 			"key_masked":     maskKey(info.Key),
 			"name":           info.Name,
