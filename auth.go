@@ -4,7 +4,6 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -88,8 +87,8 @@ func maskKey(key string) string {
 func generateRandomKey(n int) string {
 	b := make([]byte, n)
 	if _, err := cryptorand.Read(b); err != nil {
-		// Fallback: shouldn't happen, but fail safe
-		return "00000000000000000000000000000000"
+		// crypto/rand failure is unrecoverable — never use a deterministic fallback
+		log.Fatalf("[auth] CRITICAL: crypto/rand.Read failed: %v", err)
 	}
 	return hex.EncodeToString(b)
 }
@@ -378,8 +377,8 @@ func (am *AuthManager) IncrementRequests(key string) {
 func generateGatewayKey() string {
 	b := make([]byte, 24) // 24 bytes → 32 base64 chars
 	if _, err := cryptorand.Read(b); err != nil {
-		// Fallback (should never happen)
-		return "gw-" + fmt.Sprintf("%d", time.Now().UnixNano())
+		// crypto/rand failure is unrecoverable — never use a predictable fallback
+		log.Fatalf("[auth] CRITICAL: crypto/rand.Read failed: %v", err)
 	}
 	// URL-safe base64, strip padding
 	encoded := base64.RawURLEncoding.EncodeToString(b)
@@ -417,15 +416,8 @@ func AdminMiddleware(am *AuthManager) gin.HandlerFunc {
 		}
 		fullKey, exists := c.Get("client_key")
 		if !exists {
-			// No auth context — either auth is disabled (no keys) or a bug.
-			// When no keys loaded (fresh deploy), treat as admin (dev fallback).
-			am.mu.RLock()
-			noKeys := len(am.keys) == 0
-			am.mu.RUnlock()
-			if noKeys {
-				c.Next()
-				return
-			}
+			// No auth context — always reject (defense-in-depth).
+			// AuthMiddleware should have already returned 503 when no keys are loaded.
 			c.JSON(401, gin.H{"error": "authentication required"})
 			c.Abort()
 			return

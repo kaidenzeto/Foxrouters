@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -768,6 +769,10 @@ func handleLogin(am *AuthManager) gin.HandlerFunc {
 		}
 
 		// Set HttpOnly cookie — 7 day expiry, not accessible via JS (XSS protection)
+		// SameSite=Lax prevents CSRF on cross-site form submissions (most browsers default to Lax,
+		// but we set it explicitly for defense-in-depth). Secure=false because the gateway
+		// typically runs behind a reverse proxy that terminates TLS.
+		c.SetSameSite(http.SameSiteLaxMode)
 		c.SetCookie("foxrouters_session", req.Key, 7*24*3600, "/", "", false, true)
 		c.Redirect(302, "/dashboard")
 	}
