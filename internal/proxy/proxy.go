@@ -1,4 +1,13 @@
-package main
+// Package proxy wires the HTTP entrypoint (/v1/chat/completions, /v1/models)
+// to the correct upstream — Grok or CodeBuddy — and emits Prometheus metrics
+// + async ClickHouse audit rows for every proxied call.
+//
+// Dependencies:
+//   - internal/upstream  (isGrokModel, expandGrokAlias, proxyGrok, proxyCodeBuddy, MAX_REQUEST_BODY)
+//   - internal/db        (RequestLog DTO, Store.LogRequest)
+//   - internal/auth      (Manager.Get / IsModelAllowed / IncrementTokens / IncrementRequests)
+//   - internal/metrics   (RequestsTotal, RequestDuration)
+package proxy
 
 import (
 	"encoding/json"
@@ -8,12 +17,13 @@ import (
 	"strings"
 	"time"
 
+	"foxrouters/internal/auth"
+	"foxrouters/internal/db"
 	"foxrouters/internal/metrics"
+	"foxrouters/internal/upstream"
 
 	"github.com/gin-gonic/gin"
 )
-
-// MAX_REQUEST_BODY moved to internal/upstream (aliased in upstream_adapter.go).
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -39,7 +49,7 @@ func extractInputText(bodyMap map[string]any) string {
 		content := msg["content"]
 		switch v := content.(type) {
 		case string:
-			return truncateLog(v, 500)
+			return upstream.TruncateLog(v, 500)
 		case []any:
 			// Array of content parts (vision etc.) — extract text parts
 			var parts []string
@@ -55,14 +65,12 @@ func extractInputText(bodyMap map[string]any) string {
 				}
 			}
 			if len(parts) > 0 {
-				return truncateLog(strings.Join(parts, " "), 500)
+				return upstream.TruncateLog(strings.Join(parts, " "), 500)
 			}
 		}
 	}
 	return ""
 }
-
-// truncateLog moved to internal/upstream (aliased in upstream_adapter.go).
 
 // toInt safely converts interface{} from c.Get() to int.
 func toInt(v interface{}) int {
@@ -89,7 +97,11 @@ func toString(v interface{}) string {
 // MAIN HANDLER
 // ============================================================================
 
-func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChecker, authMgr *AuthManager) gin.HandlerFunc {
+// ProxyRequest routes /v1/chat/completions to Grok or CodeBuddy based on the
+// requested model, expands Grok aliases, enforces per-key model whitelists,
+// records Prometheus metrics, updates per-key token quotas, and emits an
+// async RequestLog to ClickHouse for chat completions only.
+func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManager, hc *upstream.HealthChecker, authMgr *auth.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 
@@ -156,12 +168,12 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 		}
 
 		// Cap request body to prevent OOM / DoS via multi-GB uploads.
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MAX_REQUEST_BODY)
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, upstream.MAX_REQUEST_BODY)
 		body, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			// MaxBytesReader returns *http.MaxBytesError when limit exceeded
 			if _, ok := err.(*http.MaxBytesError); ok {
-				c.JSON(413, gin.H{"error": "request body too large", "limit_bytes": MAX_REQUEST_BODY})
+				c.JSON(413, gin.H{"error": "request body too large", "limit_bytes": upstream.MAX_REQUEST_BODY})
 				return
 			}
 			c.JSON(400, gin.H{"error": "read body failed"})
@@ -183,7 +195,7 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 
 		// Model alias expansion: grok-4.5-{high,medium,low,auto,none} → grok-4.5 + reasoning_effort
 		// Mirrors 9router's grok-cli provider (upstreamModelId + thinking level).
-		if effort, ok := expandGrokAlias(model); ok {
+		if effort, ok := upstream.ExpandGrokAlias(model); ok {
 			model = "grok-4.5"
 			bodyMap["model"] = model
 			// Only set reasoning_effort if client didn't specify one already
@@ -203,9 +215,9 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 			if info := authMgr.Get(fullKey); info != nil {
 				if !info.IsModelAllowed(model) {
 					c.JSON(403, gin.H{
-						"error":  "model not allowed for this API key",
-						"model":  model,
-						"hint":   "this key is restricted to specific models — contact the gateway operator",
+						"error": "model not allowed for this API key",
+						"model": model,
+						"hint":  "this key is restricted to specific models — contact the gateway operator",
 					})
 					c.Set("error_msg", "model not allowed: "+model)
 					errJSON, _ := json.Marshal(gin.H{"error": "model not allowed", "model": model})
@@ -224,12 +236,12 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 		}
 
 		startTime := time.Now()
-		upstream := "codebuddy"
-		if isGrokModel(model) {
-			upstream = "grok"
-			proxyGrok(c, body, grokAM, clientStream, hc, model)
+		upstreamName := "codebuddy"
+		if upstream.IsGrokModel(model) {
+			upstreamName = "grok"
+			upstream.ProxyGrok(c, body, grokAM, clientStream, hc, model)
 		} else {
-			proxyCodeBuddy(c, body, bodyMap, cbKM, clientStream, hc)
+			upstream.ProxyCodeBuddy(c, body, bodyMap, cbKM, clientStream, hc)
 		}
 
 		// Record Prometheus metrics for this proxied request. Bucket status by
@@ -237,8 +249,8 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 		// standard histogram buckets. Cheap: label lookups + atomic increments.
 		elapsed := time.Since(startTime).Seconds()
 		status := strconv.Itoa(c.Writer.Status())
-		metrics.RequestsTotal.WithLabelValues(upstream, status).Inc()
-		metrics.RequestDuration.WithLabelValues(upstream).Observe(elapsed)
+		metrics.RequestsTotal.WithLabelValues(upstreamName, status).Inc()
+		metrics.RequestDuration.WithLabelValues(upstreamName).Observe(elapsed)
 
 		// Per-key token quota tracking
 		fullKey = c.GetString("client_key")
@@ -263,12 +275,17 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 			responseBody, _ := c.Get("response_body")
 
 			// Full request/response JSON stored in ClickHouse (ZSTD) — unlimited.
-			rl := RequestLog{
+			rl := db.RequestLog{
 				Timestamp:  startTime,
 				RequestID:  c.GetString("request_id"),
 				ClientKey:  c.GetString("client_key_masked"),
 				Model:      model,
-				Upstream:   func() string { if isGrokModel(model) { return "grok" }; return "codebuddy" }(),
+				Upstream: func() string {
+					if upstream.IsGrokModel(model) {
+						return "grok"
+					}
+					return "codebuddy"
+				}(),
 				AccountID:  c.GetString("upstream_account"),
 				StatusCode: c.Writer.Status(),
 				LatencyMs:  int(time.Since(startTime).Milliseconds()),
