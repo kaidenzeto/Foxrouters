@@ -5,15 +5,14 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"foxrouters/internal/upstream"
 )
 
 func TestVersionConst(t *testing.T) {
 	if Version == "" {
 		t.Fatal("Version empty")
 	}
-	// Version is now injected via -ldflags "-X main.Version=<tag>".
-	// Default is "dev" when built without ldflags; production builds set it to git tag.
-	// We only verify it's non-empty and non-default-pattern here.
 	if Version == "dev" {
 		t.Log("Version = dev (built without ldflags — OK for local dev)")
 	}
@@ -21,7 +20,6 @@ func TestVersionConst(t *testing.T) {
 
 func TestLogFullBodyMax(t *testing.T) {
 	// Full body is unlimited (no LOG_FULL_BODY_MAX constant) — bodyString passthrough.
-	// Guard: RequestLog still accepts large payloads via json.RawMessage.
 	big := make([]byte, 2*1024*1024)
 	for i := range big {
 		big[i] = 'a'
@@ -34,18 +32,22 @@ func TestLogFullBodyMax(t *testing.T) {
 
 func TestGrokLenO1(t *testing.T) {
 	am := NewGrokAccountManager(nil)
-	am.accounts = []*GrokAccount{
-		{Email: "a@t.com", AccessToken: "t", RefreshToken: "r", expiresAt: time.Now().Add(time.Hour)},
-		{Email: "b@t.com", AccessToken: "t", RefreshToken: "r", expiresAt: time.Now().Add(time.Hour)},
-		{Email: "c@t.com", AccessToken: "t", RefreshToken: "r", expiresAt: time.Now().Add(time.Hour)},
-	}
+	am.SetAccountsForTest([]*GrokAccount{
+		upstream.NewGrokAccountForTest("a@t.com", "t", "r"),
+		upstream.NewGrokAccountForTest("b@t.com", "t", "r"),
+		upstream.NewGrokAccountForTest("c@t.com", "t", "r"),
+	})
 	if am.Len() != 3 {
 		t.Fatalf("Len = %d", am.Len())
 	}
 }
 
 func TestCBLenO1(t *testing.T) {
-	km := &CBKeyManager{keys: []*CBKey{{Key: "ck_a"}, {Key: "ck_b"}}}
+	km := NewCBKeyManager(nil)
+	km.SetKeysForTest([]*CBKey{
+		upstream.NewCBKeyForTest("ck_a"),
+		upstream.NewCBKeyForTest("ck_b"),
+	})
 	if km.Len() != 2 {
 		t.Fatalf("Len = %d", km.Len())
 	}
@@ -54,20 +56,16 @@ func TestCBLenO1(t *testing.T) {
 func TestGrokNextNoFullReenableScan(t *testing.T) {
 	// Cooldown past 10min should NOT be re-enabled by Next (background worker only).
 	am := NewGrokAccountManager(nil)
-	acc := &GrokAccount{
-		Email: "cd@t.com", AccessToken: "t", RefreshToken: "r",
-		expiresAt: time.Now().Add(time.Hour),
-		disabled:  true, disabledAt: time.Now().Add(-11 * time.Minute),
-	}
-	am.accounts = []*GrokAccount{acc}
+	acc := upstream.NewGrokAccountForTest("cd@t.com", "t", "r",
+		upstream.WithDisabledCooldown(time.Now().Add(-11*time.Minute)))
+	am.SetAccountsForTest([]*GrokAccount{acc})
 	_, err := am.Next()
 	if err == nil {
 		t.Fatal("Next should fail when only cooldown account exists (no hot re-enable)")
 	}
-	// Explicit reenable worker path
-	am.reenableCooldowns()
+	am.ReenableCooldowns()
 	if acc.IsDisabled() {
-		t.Fatal("reenableCooldowns should lift cooldown")
+		t.Fatal("ReenableCooldowns should lift cooldown")
 	}
 	got, err := am.Next()
 	if err != nil || got.Email != "cd@t.com" {
@@ -76,14 +74,16 @@ func TestGrokNextNoFullReenableScan(t *testing.T) {
 }
 
 func TestCBNextNoFullReenableScan(t *testing.T) {
-	km := &CBKeyManager{keys: []*CBKey{{
-		Key: "ck_test.xxx", disabled: true, disabledAt: time.Now().Add(-11 * time.Minute),
-	}}}
+	km := NewCBKeyManager(nil)
+	km.SetKeysForTest([]*CBKey{
+		upstream.NewCBKeyForTest("ck_test.xxx",
+			upstream.WithCBDisabledCooldown(time.Now().Add(-11*time.Minute))),
+	})
 	_, err := km.Next()
 	if err == nil {
 		t.Fatal("Next should fail with only cooldown key")
 	}
-	km.reenableCooldowns()
+	km.ReenableCooldowns()
 	got, err := km.Next()
 	if err != nil || got.Key != "ck_test.xxx" {
 		t.Fatalf("after reenable: %v %v", got, err)
@@ -92,14 +92,9 @@ func TestCBNextNoFullReenableScan(t *testing.T) {
 
 func TestRefreshDoesNotHoldLockAcrossSleep(t *testing.T) {
 	// Ensure GetAccessToken is callable while another goroutine holds nothing
-	// after Refresh structure change (lock split). We just verify concurrent
-	// GetAccessToken doesn't deadlock with Refresh attempt that fails network.
-	acc := &GrokAccount{
-		Email: "x@t.com", AccessToken: "old", RefreshToken: "bad-rt",
-		expiresAt: time.Now().Add(time.Hour),
-	}
+	// after Refresh structure change (lock split).
+	acc := upstream.NewGrokAccountForTest("x@t.com", "old", "bad-rt")
 	var wg sync.WaitGroup
-	// Concurrent readers during failed refresh
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
@@ -176,7 +171,6 @@ func TestCBKeyAddKeyConcurrent(t *testing.T) {
 	if km.Len() == 0 {
 		t.Fatal("expected some keys")
 	}
-	// all adds of same key should be idempotent
 	km2 := NewCBKeyManager(nil)
 	var wg2 sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -197,10 +191,8 @@ func TestCBKeyAddKeyConcurrent(t *testing.T) {
 // the global default RPM. Bug found by GLM-5.2 review.
 func TestRateLimitRPMZeroUnlimited(t *testing.T) {
 	am := NewAuthManagerForTest(nil)
-	// Bootstrap key with RPM=0 (unlimited) — should bypass rate limit
 	am.Add("gw-test-unlimited", "test", 0, 0, 0)
 
-	// Verify the key has RPM=0
 	info := am.Get("gw-test-unlimited")
 	if info == nil {
 		t.Fatal("key not found")
@@ -208,11 +200,7 @@ func TestRateLimitRPMZeroUnlimited(t *testing.T) {
 	if info.RPM != 0 {
 		t.Fatalf("RPM = %d, want 0 (unlimited)", info.RPM)
 	}
-	// The middleware logic: if info.RPM == 0 → c.Next() (bypass).
-	// AllowWithLimit(0) returns true (unlimited), but the middleware
-	// should short-circuit before calling it.
 	if info.RPM == 0 {
-		// Simulate middleware bypass — all requests pass
 		return
 	}
 	t.Fatal("RPM=0 bypass logic broken — should not reach here")

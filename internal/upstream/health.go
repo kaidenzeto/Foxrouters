@@ -1,4 +1,4 @@
-package main
+package upstream
 
 import (
 	"fmt"
@@ -12,10 +12,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// healthStatusOK reports whether an upstream health-probe HTTP status is healthy.
+// HealthStatusOK reports whether an upstream health-probe HTTP status is healthy.
 // Only 2xx/3xx count. 401/403 (auth/ban/gate) and 4xx/5xx are unhealthy —
 // the old `status < 500` rule treated 403 Access Denied as healthy.
-func healthStatusOK(code int) bool {
+func HealthStatusOK(code int) bool {
 	return code >= 200 && code < 400
 }
 
@@ -55,10 +55,10 @@ type UpstreamHealth struct {
 	// Passive stats (atomic for lock-free reads)
 	totalRequests  atomic.Int64
 	totalErrors    atomic.Int64
-	totalLatencyMs atomic.Int64 // cumulative latency for avg calc
-	lastRequestAt  atomic.Int64 // unix nano
-	lastErrorAt    atomic.Int64 // unix nano
-	lastErrorMsg   atomic.Value // string
+	totalLatencyMs atomic.Int64
+	lastRequestAt  atomic.Int64
+	lastErrorAt    atomic.Int64
+	lastErrorMsg   atomic.Value
 
 	// Active health check
 	lastCheckAt    time.Time
@@ -66,8 +66,16 @@ type UpstreamHealth struct {
 	lastCheckOK    bool
 }
 
-func newUpstreamHealth(name string) *UpstreamHealth {
+// NewUpstreamHealth constructs a health tracker with the circuit closed.
+func NewUpstreamHealth(name string) *UpstreamHealth {
 	return &UpstreamHealth{Name: name, state: CircuitClosed}
+}
+
+// State returns the current circuit state (mutex-safe).
+func (h *UpstreamHealth) State() CircuitState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.state
 }
 
 // RecordRequest tracks a request attempt (passive health).
@@ -92,7 +100,6 @@ func (h *UpstreamHealth) RecordRequest(latency time.Duration, err error) {
 	} else {
 		h.mu.Lock()
 		if h.state == CircuitHalfOpen {
-			// Successful probe → close circuit
 			h.state = CircuitClosed
 			h.consecutiveErrs = 0
 			h.halfOpenProbes = 0
@@ -106,7 +113,6 @@ func (h *UpstreamHealth) RecordRequest(latency time.Duration, err error) {
 }
 
 // CanRequest checks if a request should be allowed through (circuit breaker).
-// Returns true if allowed, false if circuit is open.
 func (h *UpstreamHealth) CanRequest() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -115,7 +121,6 @@ func (h *UpstreamHealth) CanRequest() bool {
 	case CircuitClosed:
 		return true
 	case CircuitOpen:
-		// Check if cooldown elapsed → transition to half-open
 		if time.Since(h.openedAt) >= CB_OPEN_DURATION {
 			h.state = CircuitHalfOpen
 			h.halfOpenProbes = 0
@@ -125,7 +130,6 @@ func (h *UpstreamHealth) CanRequest() bool {
 		}
 		return false
 	case CircuitHalfOpen:
-		// Allow limited probes
 		if h.halfOpenProbes < CB_HALF_OPEN_PROBES {
 			h.halfOpenProbes++
 			return true
@@ -181,16 +185,17 @@ func (h *UpstreamHealth) Stats() gin.H {
 
 // HealthChecker manages active health checks for all upstreams.
 type HealthChecker struct {
-	grok   *UpstreamHealth
-	cb     *UpstreamHealth
+	Grok   *UpstreamHealth
+	CB     *UpstreamHealth
 	grokAM *GrokAccountManager
 	cbKM   *CBKeyManager
 }
 
-func newHealthChecker(grokAM *GrokAccountManager, cbKM *CBKeyManager) *HealthChecker {
+// NewHealthChecker wires a health checker to the pool managers.
+func NewHealthChecker(grokAM *GrokAccountManager, cbKM *CBKeyManager) *HealthChecker {
 	return &HealthChecker{
-		grok:   newUpstreamHealth("grok"),
-		cb:     newUpstreamHealth("codebuddy"),
+		Grok:   NewUpstreamHealth("grok"),
+		CB:     NewUpstreamHealth("codebuddy"),
 		grokAM: grokAM,
 		cbKM:   cbKM,
 	}
@@ -222,10 +227,9 @@ func (hc *HealthChecker) cbCheckLoop() {
 }
 
 func (hc *HealthChecker) checkGrok() {
-	h := hc.grok
+	h := hc.Grok
 	start := time.Now()
 
-	// LLM test: send minimal chat request via first available Grok account
 	accounts := hc.grokAM.GetAll()
 	if len(accounts) == 0 {
 		h.mu.Lock()
@@ -243,8 +247,6 @@ func (hc *HealthChecker) checkGrok() {
 		return
 	}
 
-	// Pick first non-disabled account. Do NOT fall back to a banned account —
-	// that would probe with a known-bad token and misclassify 403 as "upstream OK".
 	var acc *GrokAccount
 	for _, a := range accounts {
 		if !a.IsDisabled() {
@@ -262,7 +264,6 @@ func (hc *HealthChecker) checkGrok() {
 		return
 	}
 
-	// Build minimal chat request
 	body := `{"model":"grok-4.5","messages":[{"role":"user","content":"Hi"}],"stream":false,"max_tokens":5}`
 	req, _ := http.NewRequest("POST", XAI_UPSTREAM_URL+"/chat/completions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+acc.GetAccessToken())
@@ -289,9 +290,7 @@ func (hc *HealthChecker) checkGrok() {
 		}
 	} else {
 		resp.Body.Close()
-		// 2xx/3xx only. 401/403 (auth/ban/gate) are unhealthy — previously
-		// status < 500 treated 403 Access Denied as healthy (false OK).
-		h.lastCheckOK = healthStatusOK(resp.StatusCode)
+		h.lastCheckOK = HealthStatusOK(resp.StatusCode)
 		if h.lastCheckOK {
 			h.lastErrorMsg.Store("")
 			if h.state == CircuitHalfOpen {
@@ -315,10 +314,9 @@ func (hc *HealthChecker) checkGrok() {
 }
 
 func (hc *HealthChecker) checkCB() {
-	h := hc.cb
+	h := hc.CB
 	start := time.Now()
 
-	// LLM test: send minimal chat request via first available CB key
 	keys := hc.cbKM.GetAll()
 	if len(keys) == 0 {
 		h.mu.Lock()
@@ -336,7 +334,6 @@ func (hc *HealthChecker) checkCB() {
 		return
 	}
 
-	// Pick first non-disabled key. Do NOT fall back to a disabled key.
 	var key *CBKey
 	for _, k := range keys {
 		k.mu.Lock()
@@ -357,7 +354,6 @@ func (hc *HealthChecker) checkCB() {
 		return
 	}
 
-	// Build minimal CB chat request (stream=true mandatory, system message mandatory)
 	body := `{"model":"gpt-5.2","messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"Hi"}],"stream":true,"max_completion_tokens":5}`
 	req, _ := http.NewRequest("POST", CB_UPSTREAM_URL, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+key.Key)
@@ -381,8 +377,7 @@ func (hc *HealthChecker) checkCB() {
 		}
 	} else {
 		resp.Body.Close()
-		// 2xx/3xx only — 401/403/429 are unhealthy
-		h.lastCheckOK = healthStatusOK(resp.StatusCode)
+		h.lastCheckOK = HealthStatusOK(resp.StatusCode)
 		if h.lastCheckOK {
 			h.lastErrorMsg.Store("")
 			if h.state == CircuitHalfOpen {

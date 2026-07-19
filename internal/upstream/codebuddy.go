@@ -1,4 +1,4 @@
-package main
+package upstream
 
 import (
 	"bufio"
@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"foxrouters/internal/db"
 )
 
 // ============================================================================
@@ -28,32 +30,94 @@ type CBKey struct {
 	disabledAt  time.Time
 	creditsUsed float64
 	totalReqs   int64
-	db          *DBStore
+	db          *db.Store
+}
+
+// NewCBKeyForTest returns a CBKey for whitebox tests.
+func NewCBKeyForTest(key string, opts ...CBKeyOption) *CBKey {
+	k := &CBKey{Key: key}
+	for _, o := range opts {
+		o(k)
+	}
+	return k
+}
+
+// CBKeyOption mutates a test CBKey.
+type CBKeyOption func(*CBKey)
+
+// WithCBDisabledCooldown marks the key disabled with a cooldown timestamp.
+// Zero time = permanent disable.
+func WithCBDisabledCooldown(at time.Time) CBKeyOption {
+	return func(k *CBKey) { k.disabled = true; k.disabledAt = at }
+}
+
+// Stats returns credits used, total requests, and disabled flag.
+func (k *CBKey) Stats() (float64, int64, bool) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.creditsUsed, k.totalReqs, k.disabled
+}
+
+// IsDisabled returns the disabled flag (mutex-safe).
+func (k *CBKey) IsDisabled() bool {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.disabled
+}
+
+// AddCredits accumulates credits and auto-disables when the limit is hit.
+func (k *CBKey) AddCredits(c float64) {
+	k.mu.Lock()
+	k.creditsUsed += c
+	k.totalReqs++
+	if k.creditsUsed >= CB_CREDIT_LIMIT {
+		k.disabled = true
+		k.disabledAt = time.Time{} // permanent until reset
+		slog.Warn("key disabled (credits used)",
+			"module", "cb",
+			"key", k.Key[:8]+"..."+k.Key[len(k.Key)-4:],
+			"credits_used", k.creditsUsed,
+			"credit_limit", CB_CREDIT_LIMIT)
+	}
+	key := k.Key
+	credits := k.creditsUsed
+	reqs := k.totalReqs
+	disabled := k.disabled
+	disabledAt := k.disabledAt
+	k.mu.Unlock()
+	if k.db != nil {
+		saveCBKey(k.db, key, credits, reqs, disabled, disabledAt)
+	}
 }
 
 type CBKeyManager struct {
 	keys []*CBKey
 	mu   sync.RWMutex
 	next int
-	db   *DBStore
+	db   *db.Store
 }
 
-func NewCBKeyManager(db *DBStore) *CBKeyManager {
-	return &CBKeyManager{keys: make([]*CBKey, 0), db: db}
+func NewCBKeyManager(store *db.Store) *CBKeyManager {
+	return &CBKeyManager{keys: make([]*CBKey, 0), db: store}
+}
+
+// SetKeysForTest replaces the internal slice. Whitebox tests only.
+func (km *CBKeyManager) SetKeysForTest(keys []*CBKey) {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	km.keys = keys
 }
 
 // LoadFromRedis loads all CB keys from Redis (single source of truth).
 // If Redis is empty (fresh deploy), falls back to file/env as bootstrap seed,
 // then persists those keys to Redis so subsequent starts are file-independent.
 func (km *CBKeyManager) LoadFromRedis() error {
-	// Step 1: Try loading all keys + state from Redis
 	redisState, err := km.db.LoadCBKeys()
 	if err != nil {
 		return fmt.Errorf("cb keys load: %w", err)
 	}
 
 	if len(redisState) > 0 {
-		// Redis has keys — use as single source of truth
 		for apiKey, state := range redisState {
 			key := &CBKey{Key: apiKey, db: km.db}
 			if cu, err := strconv.ParseFloat(state["credits_used"], 64); err == nil {
@@ -84,7 +148,7 @@ func (km *CBKeyManager) LoadFromRedis() error {
 		return nil
 	}
 
-	// Step 2: Redis empty — bootstrap from file/env (first run only)
+	// Bootstrap from file/env (first run only)
 	keysStr := os.Getenv("CB_API_KEYS")
 	if keysStr == "" {
 		keysStr = os.Getenv("CB_API_KEY")
@@ -105,7 +169,6 @@ func (km *CBKeyManager) LoadFromRedis() error {
 		return nil
 	}
 
-	// Seed: parse keys, persist to Redis so future starts are file-independent
 	seedCount := 0
 	for _, k := range strings.FieldsFunc(keysStr, func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r'
@@ -116,9 +179,8 @@ func (km *CBKeyManager) LoadFromRedis() error {
 		}
 		key := &CBKey{Key: k, db: km.db}
 		km.keys = append(km.keys, key)
-		// Persist to Redis immediately
 		if km.db != nil {
-			dbSaveCBKey(km.db, k, 0, 0, false, time.Time{})
+			saveCBKey(km.db, k, 0, 0, false, time.Time{})
 		}
 		seedCount++
 	}
@@ -132,7 +194,6 @@ func (km *CBKeyManager) Next() (*CBKey, error) {
 	if len(km.keys) == 0 {
 		return nil, fmt.Errorf("no cb keys")
 	}
-	// O(k) round-robin only — re-enable runs in background worker
 	for i := 0; i < len(km.keys); i++ {
 		idx := (km.next + i) % len(km.keys)
 		key := km.keys[idx]
@@ -163,9 +224,6 @@ func (km *CBKeyManager) GetAll() []*CBKey {
 }
 
 // AddKey hot-imports a CodeBuddy API key into the runtime pool + Redis.
-// Returns (added=true, total) when the key is new; (added=false, total) if already present.
-// Does NOT write the key file — caller (register pipeline) owns file append.
-// New keys start at credits=0; caller may pre-seed Redis before import if needed.
 func (km *CBKeyManager) AddKey(apiKey string) (added bool, total int) {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
@@ -183,15 +241,14 @@ func (km *CBKeyManager) AddKey(apiKey string) (added bool, total int) {
 	km.keys = append(km.keys, key)
 	total = len(km.keys)
 	km.mu.Unlock()
-	// Persist outside manager lock (Redis I/O must not hold km.mu)
 	if km.db != nil {
-		dbSaveCBKey(km.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
+		saveCBKey(km.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 	}
 	return true, total
 }
 
-// reenableCooldowns lifts temp cooldowns past 10 minutes (background only).
-func (km *CBKeyManager) reenableCooldowns() {
+// ReenableCooldowns lifts temp cooldowns past 10 minutes (background only).
+func (km *CBKeyManager) ReenableCooldowns() {
 	keys := km.GetAll()
 	now := time.Now()
 	var reenabled []*CBKey
@@ -205,56 +262,20 @@ func (km *CBKeyManager) reenableCooldowns() {
 	}
 	for _, key := range reenabled {
 		if key.db != nil {
-			dbSaveCBKey(key.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
+			saveCBKey(key.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 		}
 		slog.Info("re-enabled cooldown key", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
 	}
 }
 
-func reenableCBWorker(km *CBKeyManager) {
-	km.reenableCooldowns()
+// ReenableCBWorker is the long-lived goroutine that lifts cooldowns.
+func ReenableCBWorker(km *CBKeyManager) {
+	km.ReenableCooldowns()
 	ticker := time.NewTicker(REENABLE_TICK)
 	defer ticker.Stop()
 	for range ticker.C {
-		km.reenableCooldowns()
+		km.ReenableCooldowns()
 	}
-}
-
-// CB_CREDIT_LIMIT: disable key when credits used reaches this threshold.
-// Pro Trial = 250 credits. We disable at 240 to leave a small buffer.
-const CB_CREDIT_LIMIT = 240.0
-
-func (k *CBKey) AddCredits(c float64) {
-	k.mu.Lock()
-	k.creditsUsed += c
-	k.totalReqs++
-	if k.creditsUsed >= CB_CREDIT_LIMIT {
-		k.disabled = true
-		k.disabledAt = time.Time{} // permanent until reset
-		slog.Warn("key disabled (credits used)",
-			"module", "cb",
-			"key", k.Key[:8]+"..."+k.Key[len(k.Key)-4:],
-			"credits_used", k.creditsUsed,
-			"credit_limit", CB_CREDIT_LIMIT)
-	}
-	// Snapshot for persistence — save outside lock (Redis I/O must not hold k.mu)
-	key := k.Key
-	credits := k.creditsUsed
-	reqs := k.totalReqs
-	disabled := k.disabled
-	disabledAt := k.disabledAt
-	k.mu.Unlock()
-	// Persist outside lock
-	if k.db != nil {
-		dbSaveCBKey(k.db, key, credits, reqs, disabled, disabledAt)
-		dbUpsertCBKey(k.db, key, credits, reqs, disabled)
-	}
-}
-
-func (k *CBKey) Stats() (float64, int64, bool) {
-	k.mu.RLock()
-	defer k.mu.RUnlock()
-	return k.creditsUsed, k.totalReqs, k.disabled
 }
 
 // ============================================================================
@@ -276,7 +297,6 @@ func cbTransform(body []byte) ([]byte, error) {
 	if model, ok := m["model"].(string); ok {
 		m["model"] = stripCBPrefix(model)
 	}
-	// Convert max_tokens → max_completion_tokens (CB expects the latter)
 	if mt, ok := m["max_tokens"]; ok {
 		if _, exists := m["max_completion_tokens"]; !exists {
 			m["max_completion_tokens"] = mt
@@ -300,7 +320,6 @@ func cbTransform(body []byte) ([]byte, error) {
 }
 
 // cbCollectStream: read SSE stream → return single JSON (for non-stream clients).
-// Also extracts credit usage from the final chunk and updates the key.
 func cbCollectStream(resp *http.Response, model string, key *CBKey) gin.H {
 	defer resp.Body.Close()
 	var content, reasoning strings.Builder
@@ -369,10 +388,10 @@ func cbCollectStream(resp *http.Response, model string, key *CBKey) gin.H {
 	return resp2
 }
 
-func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBKeyManager, clientStream bool, hc *HealthChecker) {
-	// Circuit breaker: skip if upstream is open
-	if !hc.cb.CanRequest() {
-		hc.cb.RecordRequest(0, fmt.Errorf("circuit open"))
+// ProxyCodeBuddy forwards a chat/completions request to CodeBuddy.
+func ProxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBKeyManager, clientStream bool, hc *HealthChecker) {
+	if !hc.CB.CanRequest() {
+		hc.CB.RecordRequest(0, fmt.Errorf("circuit open"))
 		c.JSON(503, gin.H{"error": "codebuddy upstream circuit breaker open"})
 		c.Set("error_msg", "cb circuit breaker open")
 		errJSON, _ := json.Marshal(gin.H{"error": "codebuddy upstream circuit breaker open"})
@@ -415,13 +434,13 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 			key.mu.Lock()
 			key.disabled = true
 			if resp.StatusCode == 401 {
-				key.disabledAt = time.Time{} // permanent — key invalid
+				key.disabledAt = time.Time{}
 			} else {
-				key.disabledAt = time.Now() // cooldown 10m — rate limited
+				key.disabledAt = time.Now()
 			}
 			key.mu.Unlock()
 			if key.db != nil {
-				dbSaveCBKey(key.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
+				saveCBKey(key.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 			}
 			if resp.StatusCode == 401 {
 				slog.Warn("key disabled (401 unauthorized, permanent)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
@@ -431,8 +450,6 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 			continue
 		}
 
-		// Check for Credits Exhausted error (code 14018) in response body
-		// CB may return 400/403 with error JSON instead of 429
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
@@ -440,52 +457,46 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 			if strings.Contains(bodyStr, "14018") || strings.Contains(bodyStr, "Credits exhausted") {
 				key.mu.Lock()
 				key.disabled = true
-				key.disabledAt = time.Time{} // permanent
+				key.disabledAt = time.Time{}
 				key.mu.Unlock()
 				if key.db != nil {
-					dbSaveCBKey(key.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
+					saveCBKey(key.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 				}
 				slog.Warn("key disabled (credits exhausted, code 14018)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
 				continue
 			}
-			// 400 with invalid_request_parameters = client error, NOT key problem.
-			// Return error to client without disabling the key.
 			if resp.StatusCode == 400 && (strings.Contains(bodyStr, "11133") || strings.Contains(bodyStr, "Invalid request parameters")) {
-				hc.cb.RecordRequest(time.Since(reqStart), fmt.Errorf("cb 400 invalid params"))
+				hc.CB.RecordRequest(time.Since(reqStart), fmt.Errorf("cb 400 invalid params"))
 				c.JSON(400, gin.H{"error": "CodeBuddy rejected request parameters", "detail": truncateLog(bodyStr, 500)})
 				c.Set("error_msg", truncateLog(bodyStr, 500))
 				errJSON, _ := json.Marshal(gin.H{"error": "CodeBuddy rejected request parameters", "detail": truncateLog(bodyStr, 500)})
 				c.Set("response_body", json.RawMessage(errJSON))
 				return
 			}
-			// 11102 model not found / "service info not found" is a client model name error.
-			// Must NOT burn the whole key pool (one bad model would disable every key).
 			if resp.StatusCode == 400 && (strings.Contains(bodyStr, "11102") ||
 				strings.Contains(bodyStr, "service info not found") ||
 				strings.Contains(bodyStr, "model [") && strings.Contains(bodyStr, "] service info not found")) {
-				hc.cb.RecordRequest(time.Since(reqStart), fmt.Errorf("cb 400 model not found"))
+				hc.CB.RecordRequest(time.Since(reqStart), fmt.Errorf("cb 400 model not found"))
 				c.JSON(400, gin.H{"error": "model not available on CodeBuddy", "detail": truncateLog(bodyStr, 500)})
 				c.Set("error_msg", truncateLog(bodyStr, 500))
 				errJSON, _ := json.Marshal(gin.H{"error": "model not available on CodeBuddy", "detail": truncateLog(bodyStr, 500)})
 				c.Set("response_body", json.RawMessage(errJSON))
 				return
 			}
-			// Other 4xx errors — temporary disable
 			key.mu.Lock()
 			key.disabled = true
 			key.disabledAt = time.Now()
 			key.mu.Unlock()
 			if key.db != nil {
-				dbSaveCBKey(key.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
+				saveCBKey(key.db, key.Key, key.creditsUsed, key.totalReqs, key.disabled, key.disabledAt)
 			}
 			slog.Warn("key disabled (4xx)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:], "status", resp.StatusCode, "body", truncateLog(bodyStr, 200))
 			continue
 		}
 
-		// 5xx = upstream error, track for health
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
-			hc.cb.RecordRequest(time.Since(reqStart), fmt.Errorf("upstream %d", resp.StatusCode))
+			hc.CB.RecordRequest(time.Since(reqStart), fmt.Errorf("upstream %d", resp.StatusCode))
 			continue
 		}
 
@@ -495,7 +506,6 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 	}
 
 	if lastResp == nil {
-		// Pool exhaustion is NOT an upstream failure — don't trip circuit breaker.
 		c.JSON(503, gin.H{"error": "all cb keys disabled"})
 		c.Set("error_msg", "all cb keys disabled")
 		errJSON, _ := json.Marshal(gin.H{"error": "all cb keys disabled"})
@@ -503,16 +513,11 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 		return
 	}
 
-	// Success — track passive health
-	hc.cb.RecordRequest(time.Since(reqStart), nil)
-
+	hc.CB.RecordRequest(time.Since(reqStart), nil)
 	c.Set("upstream_account", lastKey.Key[:8]+"..."+lastKey.Key[len(lastKey.Key)-4:])
 
 	if clientStream {
-		// Pass SSE through, extract credit + content + tokens from chunks
 		defer lastResp.Body.Close()
-		// Strip Content-Encoding/Content-Length — Go auto-decompresses,
-		// forwarding these headers causes client decompression mismatch.
 		for k, v := range lastResp.Header {
 			if strings.EqualFold(k, "Content-Encoding") || strings.EqualFold(k, "Content-Length") {
 				continue
@@ -529,11 +534,9 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 		var streamTokensIn, streamTokensOut int
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Extract credit + content + tokens from SSE data lines
 			if strings.HasPrefix(line, "data: ") {
 				data := strings.TrimPrefix(line, "data: ")
 				if data != "[DONE]" && data != "" {
-					// Single unmarshal (content + usage + error)
 					var sc sseChunk
 					if json.Unmarshal([]byte(data), &sc) == nil {
 						if sc.Error != nil {
@@ -545,7 +548,7 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 								lastKey.disabledAt = time.Time{}
 								lastKey.mu.Unlock()
 								if lastKey.db != nil {
-									dbSaveCBKey(lastKey.db, lastKey.Key, lastKey.creditsUsed, lastKey.totalReqs, lastKey.disabled, lastKey.disabledAt)
+									saveCBKey(lastKey.db, lastKey.Key, lastKey.creditsUsed, lastKey.totalReqs, lastKey.disabled, lastKey.disabledAt)
 								}
 								slog.Warn("key disabled (credits exhausted in stream)", "module", "cb", "key", lastKey.Key[:8]+"..."+lastKey.Key[len(lastKey.Key)-4:])
 							}
@@ -572,11 +575,9 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 				flusher.Flush()
 			}
 		}
-		// Store captured output + tokens for logging
 		c.Set("output_text", truncateLog(streamContent.String(), 1000))
 		c.Set("tokens_in", streamTokensIn)
 		c.Set("tokens_out", streamTokensOut)
-		// Reconstruct full JSON response for audit trail
 		respJSON, _ := json.Marshal(gin.H{
 			"choices": []gin.H{{
 				"message":       gin.H{"role": "assistant", "content": streamContent.String()},
@@ -592,14 +593,11 @@ func proxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 		})
 		c.Set("response_body", json.RawMessage(respJSON))
 	} else {
-		// Collect SSE → single JSON
 		result := cbCollectStream(lastResp, originalModel, lastKey)
 		c.JSON(200, result)
-		// Store full response JSON for audit trail
 		if respBytes, err := json.Marshal(result); err == nil {
 			c.Set("response_body", json.RawMessage(respBytes))
 		}
-		// Extract output text + tokens from collected result
 		if choices, ok := result["choices"].([]gin.H); ok && len(choices) > 0 {
 			if msg, ok := choices[0]["message"].(gin.H); ok {
 				if content, ok := msg["content"].(string); ok {

@@ -105,23 +105,19 @@ func TestGrokNextReenableDoesNotHoldLockDuringSave(t *testing.T) {
 	// Re-enable is background-only now. Next itself does not re-enable.
 	// Test reenableCooldowns + concurrent GetAccessToken after lift.
 	am := NewGrokAccountManager(nil)
-	acc := &GrokAccount{
-		Email:        "cooldown@test.com",
-		AccessToken:  "tok",
-		RefreshToken: "rt",
-		expiresAt:    time.Now().Add(time.Hour),
-		disabled:     true,
-		disabledAt:   time.Now().Add(-11 * time.Minute),
-		db:           nil,
-	}
-	am.accounts = []*GrokAccount{acc}
+	acc := NewGrokAccountForTest(
+		"cooldown@test.com", "tok", "rt",
+		WithExpiresAt(time.Now().Add(time.Hour)),
+		WithDisabledCooldown(time.Now().Add(-11*time.Minute)),
+	)
+	am.SetAccountsForTest([]*GrokAccount{acc})
 
 	// Next must NOT re-enable (hot path is O(k) only)
 	if _, err := am.Next(); err == nil {
 		t.Fatal("Next should not re-enable cooldowns on hot path")
 	}
 
-	am.reenableCooldowns()
+	am.ReenableCooldowns()
 	got, err := am.Next()
 	if err != nil {
 		t.Fatalf("Next after reenable: %v", err)
@@ -151,19 +147,16 @@ func TestGrokNextReenableDoesNotHoldLockDuringSave(t *testing.T) {
 }
 
 func TestCBNextReenableDoesNotHoldKeyLockDuringSave(t *testing.T) {
-	km := &CBKeyManager{keys: make([]*CBKey, 0)}
-	k := &CBKey{
-		Key:        "ck_testkey.abcdef",
-		disabled:   true,
-		disabledAt: time.Now().Add(-11 * time.Minute),
-		db:         nil,
-	}
-	km.keys = []*CBKey{k}
+	km := NewCBKeyManager(nil)
+	k := NewCBKeyForTest("ck_testkey.abcdef",
+		WithCBDisabledCooldown(time.Now().Add(-11*time.Minute)),
+	)
+	km.SetKeysForTest([]*CBKey{k})
 
 	if _, err := km.Next(); err == nil {
 		t.Fatal("Next should not re-enable on hot path")
 	}
-	km.reenableCooldowns()
+	km.ReenableCooldowns()
 	got, err := km.Next()
 	if err != nil {
 		t.Fatalf("Next after reenable: %v", err)
@@ -171,10 +164,7 @@ func TestCBNextReenableDoesNotHoldKeyLockDuringSave(t *testing.T) {
 	if got.Key != k.Key {
 		t.Fatal("wrong key")
 	}
-	got.mu.RLock()
-	disabled := got.disabled
-	got.mu.RUnlock()
-	if disabled {
+	if got.IsDisabled() {
 		t.Fatal("key should be re-enabled")
 	}
 }

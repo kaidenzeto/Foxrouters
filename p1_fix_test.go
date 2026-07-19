@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"foxrouters/internal/upstream"
 )
 
 // --- healthStatusOK ---
@@ -59,8 +61,8 @@ func TestCircuitBreaker_PoolExhaustionDoesNotOpen(t *testing.T) {
 	if !h.CanRequest() {
 		t.Fatal("circuit should stay closed when pool exhaustion does not record errors")
 	}
-	if h.state != CircuitClosed {
-		t.Fatalf("state = %s, want closed", h.state)
+	if h.State() != CircuitClosed {
+		t.Fatalf("state = %s, want closed", h.State())
 	}
 }
 
@@ -72,8 +74,8 @@ func TestCircuitBreaker_RealUpstreamErrorsStillOpen(t *testing.T) {
 	if h.CanRequest() {
 		t.Fatal("circuit should be open after consecutive upstream errors")
 	}
-	if h.state != CircuitOpen {
-		t.Fatalf("state = %s, want open", h.state)
+	if h.State() != CircuitOpen {
+		t.Fatalf("state = %s, want open", h.State())
 	}
 }
 
@@ -117,17 +119,19 @@ func TestAuthManager_ConcurrentLenIsSafe(t *testing.T) {
 
 func TestGrokAccountManager_GetAllIsCopy(t *testing.T) {
 	am := NewGrokAccountManager(nil)
-	am.accounts = []*GrokAccount{
-		{Email: "a@test.com", AccessToken: "t1", RefreshToken: "r1", expiresAt: time.Now().Add(time.Hour)},
-		{Email: "b@test.com", AccessToken: "t2", RefreshToken: "r2", expiresAt: time.Now().Add(time.Hour)},
-	}
+	am.SetAccountsForTest([]*GrokAccount{
+		upstream.NewGrokAccountForTest("a@test.com", "t1", "r1"),
+		upstream.NewGrokAccountForTest("b@test.com", "t2", "r2"),
+	})
 	all := am.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("GetAll len = %d, want 2", len(all))
 	}
 	// mutate returned slice must not affect manager
 	all[0] = nil
-	if am.accounts[0] == nil {
+	// re-fetch and ensure element 0 is intact
+	all2 := am.GetAll()
+	if all2[0] == nil {
 		t.Fatal("GetAll should return a copy; mutating result mutated manager")
 	}
 }

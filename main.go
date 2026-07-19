@@ -59,79 +59,20 @@ func init() {
 var Version = "dev"
 
 const (
-	XAI_CLIENT_ID    = "b1a00492-073a-47ea-816f-4c329264a828"
-	XAI_TOKEN_URL    = "https://auth.x.ai/oauth2/token"
-	XAI_UPSTREAM_URL = "https://cli-chat-proxy.grok.com/v1"
-	CB_UPSTREAM_URL  = "https://www.codebuddy.ai/v2/chat/completions"
-	REFRESH_BUFFER   = 10 * time.Minute
-	DEFAULT_PORT     = "20130"
-
-	GROK_CLIENT_VERSION    = "0.2.93"
-	GROK_CLIENT_IDENTIFIER = "grok-shell"
-	CB_DEFAULT_SYSTEM      = "You are a helpful assistant."
-
-	// Health check constants
-	HEALTH_CHECK_INTERVAL = 10 * time.Minute // active LLM test every 10 min
-	HEALTH_CHECK_TIMEOUT  = 30 * time.Second  // LLM test timeout
-	CB_OPEN_THRESHOLD     = 5                 // 5 consecutive errors → circuit open
-	CB_OPEN_DURATION      = 60 * time.Second  // circuit stays open 60s before half-open
-	CB_HALF_OPEN_PROBES   = 1                 // 1 probe in half-open
-
-	// Grok token pre-warm — background worker refreshes tokens BEFORE they expire,
-	// so request path never blocks on synchronous refresh.
-	PRE_WARM_TICK          = 30 * time.Second // worker checks every 30s
-	PRE_WARM_WINDOW        = 30 * time.Minute // refresh when <30min to expiry
-	MAX_CONCURRENT_REFRESH = 10               // max parallel token refreshes per tick
-	REENABLE_TICK          = 1 * time.Minute  // background cooldown re-enable (off Next hot path)
+	DEFAULT_PORT = "20130"
 
 	// Auth + rate limiting constants
 	// GATEWAY_KEY_FILE / CB_KEY_FILE resolved via env (see gatewayKeyFile())
-	RATE_LIMIT_RPM   = 60             // requests per minute per client
-	RATE_LIMIT_BURST = 10             // max burst (allow short spikes)
+	RATE_LIMIT_RPM    = 60             // requests per minute per client
+	RATE_LIMIT_BURST  = 10             // max burst (allow short spikes)
 	RATE_LIMIT_WINDOW = 1 * time.Minute // sliding window duration
 )
 
 // ============================================================================
-// SHARED HTTP CLIENT — connection pooling + HTTP/2 + keep-alive
-// Reuses TCP connections across requests (eliminates TLS handshake overhead)
+// SHARED HTTP CLIENT
+// Upstream / token-refresh / health-check clients live in internal/upstream —
+// main.go doesn't need them any more.
 // ============================================================================
-var (
-	// upstreamClient: for Grok + CB API calls (long timeout, connection pool)
-	upstreamClient = &http.Client{
-		Timeout: 300 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,             // total idle connections
-			MaxIdleConnsPerHost: 20,              // per-host idle (Grok + CB = 2 hosts)
-			IdleConnTimeout:     90 * time.Second,
-			TLSHandshakeTimeout: 10 * time.Second,
-			ForceAttemptHTTP2:   true,            // enable HTTP/2 (multiplexing + header compression)
-			// Disable compression — we handle gzip ourselves in middleware
-			DisableCompression: false,
-		},
-	}
-
-	// tokenRefreshClient: for auth.x.ai token refresh (shorter timeout)
-	tokenRefreshClient = &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			MaxIdleConnsPerHost: 5,
-			IdleConnTimeout:     60 * time.Second,
-			ForceAttemptHTTP2:   true,
-		},
-	}
-
-	// healthCheckClient: for active health checks
-	healthCheckClient = &http.Client{
-		Timeout: HEALTH_CHECK_TIMEOUT,
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			MaxIdleConnsPerHost: 5,
-			IdleConnTimeout:     60 * time.Second,
-			ForceAttemptHTTP2:   true,
-		},
-	}
-)
 
 // ============================================================================
 // MAIN

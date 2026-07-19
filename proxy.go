@@ -13,9 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// MAX_REQUEST_BODY caps inbound chat request bodies (DoS guard).
-// Responses still log up to 10MB; requests above this are rejected with 413.
-const MAX_REQUEST_BODY = 10 * 1024 * 1024
+// MAX_REQUEST_BODY moved to internal/upstream (aliased in upstream_adapter.go).
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -64,13 +62,7 @@ func extractInputText(bodyMap map[string]any) string {
 	return ""
 }
 
-// truncateLog truncates text to maxLen, adding "..." suffix if truncated.
-func truncateLog(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
+// truncateLog moved to internal/upstream (aliased in upstream_adapter.go).
 
 // toInt safely converts interface{} from c.Get() to int.
 func toInt(v interface{}) int {
@@ -263,7 +255,7 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 
 		// Async log to ClickHouse — only for chat completion endpoint,
 		// not for probes to /v1/models, /health, /props, etc.
-		if grokAM.db != nil && path == "/v1/chat/completions" {
+		if grokAM.DB() != nil && path == "/v1/chat/completions" {
 			inputText := extractInputText(bodyMap)
 			outputText, _ := c.Get("output_text")
 			tokensIn, _ := c.Get("tokens_in")
@@ -300,7 +292,7 @@ func proxyRequest(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChec
 					rl.ResponseBody = rb
 				}
 			}
-			grokAM.db.LogRequest(rl)
+			grokAM.DB().LogRequest(rl)
 		}
 	}
 }

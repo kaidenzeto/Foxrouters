@@ -1,6 +1,7 @@
-// metrics_pool.go — pool-gauge updater that touches private manager fields.
-// Metric definitions live in internal/metrics; this file just snapshots pool
-// sizes into those gauges from the same package that owns the managers.
+// metrics_pool.go — snapshots pool sizes into internal/metrics gauges.
+// The lookup uses only exported APIs on the managers (GetAll / Stats /
+// IsDisabled), so this file can live in package main even though the
+// managers themselves are in internal/upstream + internal/auth.
 package main
 
 import (
@@ -8,26 +9,23 @@ import (
 )
 
 // updatePoolGauges snapshots pool sizes into active/disabled gauges.
-// Called periodically from the pool managers' background workers so the
-// gauges stay eventually-consistent without adding hot-path overhead.
+// Called every 10s from a background ticker — cheap RLock walk, no
+// hot-path overhead.
 func updatePoolGauges(grokAM *GrokAccountManager, cbKM *CBKeyManager, authMgr *AuthManager) {
 	if grokAM != nil {
-		grokAM.mu.RLock()
 		var gActive, gDisabled int
-		for _, a := range grokAM.accounts {
+		for _, a := range grokAM.GetAll() {
 			if a.IsDisabled() {
 				gDisabled++
 			} else {
 				gActive++
 			}
 		}
-		grokAM.mu.RUnlock()
 		metrics.SetPoolGauges("grok", gActive, gDisabled)
 	}
 	if cbKM != nil {
-		cbKM.mu.RLock()
 		var cActive, cDisabled int
-		for _, k := range cbKM.keys {
+		for _, k := range cbKM.GetAll() {
 			_, _, disabled := k.Stats()
 			if disabled {
 				cDisabled++
@@ -35,7 +33,6 @@ func updatePoolGauges(grokAM *GrokAccountManager, cbKM *CBKeyManager, authMgr *A
 				cActive++
 			}
 		}
-		cbKM.mu.RUnlock()
 		metrics.SetPoolGauges("codebuddy", cActive, cDisabled)
 	}
 	if authMgr != nil {
@@ -49,19 +46,4 @@ func updatePoolGauges(grokAM *GrokAccountManager, cbKM *CBKeyManager, authMgr *A
 		}
 		metrics.SetPoolGauges("auth", aActive, aDisabled)
 	}
-}
-
-// setCircuitState is a thin wrapper that maps the local CircuitState enum
-// to the int expected by internal/metrics.SetCircuitState.
-func setCircuitState(upstream string, state CircuitState) {
-	var v int
-	switch state {
-	case CircuitClosed:
-		v = 0
-	case CircuitOpen:
-		v = 1
-	case CircuitHalfOpen:
-		v = 2
-	}
-	metrics.SetCircuitState(upstream, v)
 }

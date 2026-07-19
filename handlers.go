@@ -34,8 +34,8 @@ func handleHealthMinimal() gin.HandlerFunc {
 
 func handleHealth(grokAM *GrokAccountManager, cbKM *CBKeyManager, hc *HealthChecker, am *AuthManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		grokStats := hc.grok.Stats()
-		cbStats := hc.cb.Stats()
+		grokStats := hc.Grok.Stats()
+		cbStats := hc.CB.Stats()
 
 		// Overall status: unhealthy if any circuit is open
 		grokCircuit := grokStats["circuit_state"].(string)
@@ -103,22 +103,13 @@ func handleAccounts(grokAM *GrokAccountManager, cbKM *CBKeyManager) gin.HandlerF
 		grokAccs := grokAM.GetAll()
 		grokResult := make([]gin.H, 0)
 		for _, a := range grokAccs {
-			a.mu.RLock()
-			tokenStatus := "active"
-			if a.disabled && a.disabledAt.IsZero() {
-				tokenStatus = "banned"
-			} else if a.disabled {
-				tokenStatus = "cooldown"
-			} else if time.Now().After(a.expiresAt.Add(-REFRESH_BUFFER)) {
-				tokenStatus = "expired"
-			}
+			s := a.Snapshot()
 			grokResult = append(grokResult, gin.H{
-				"provider": "grok", "email": a.Email, "sub": a.Sub,
-				"expires_at": a.Expired, "expires_in": a.ExpiresIn,
-				"last_refresh": a.LastRefresh, "disabled": a.disabled,
-				"disabled_at": a.disabledAt, "token_status": tokenStatus,
+				"provider": "grok", "email": s.Email, "sub": s.Sub,
+				"expires_at": s.Expired, "expires_in": s.ExpiresIn,
+				"last_refresh": s.LastRefresh, "disabled": s.Disabled,
+				"disabled_at": s.DisabledAt, "token_status": s.TokenStatus,
 			})
-			a.mu.RUnlock()
 		}
 		cbKeys := cbKM.GetAll()
 		cbResult := make([]gin.H, 0)
@@ -215,57 +206,7 @@ func handleImportAccount(grokAM *GrokAccountManager) gin.HandlerFunc {
 			c.JSON(400, gin.H{"error": "email, access_token, refresh_token are required"})
 			return
 		}
-		if req.ExpiresIn == 0 {
-			req.ExpiresIn = 21600 // default 6h
-		}
-		expiresAt := time.Now().Add(time.Duration(req.ExpiresIn) * time.Second)
-		acc := &GrokAccount{
-			Email:        req.Email,
-			AccessToken:  req.AccessToken,
-			RefreshToken: req.RefreshToken,
-			IDToken:      req.IDToken,
-			ExpiresIn:     req.ExpiresIn,
-			Expired:       expiresAt.Format(time.RFC3339),
-			LastRefresh:   time.Now().Format(time.RFC3339),
-			Sub:           req.Sub,
-			expiresAt:     expiresAt,
-			db:            grokAM.db,
-		}
-		// Save to Redis
-		if grokAM.db != nil {
-			dbSaveGrokAccount(grokAM.db, acc)
-		}
-		// Add to runtime pool — capture total under lock (race-free)
-		grokAM.mu.Lock()
-		// Check if already exists
-		found := false
-		for _, existing := range grokAM.accounts {
-			if existing.Email == req.Email {
-				existing.mu.Lock()
-				existing.AccessToken = req.AccessToken
-				existing.RefreshToken = req.RefreshToken
-				existing.IDToken = req.IDToken
-				existing.ExpiresIn = req.ExpiresIn
-				existing.Expired = acc.Expired
-				existing.LastRefresh = acc.LastRefresh
-				existing.Sub = req.Sub
-				existing.expiresAt = expiresAt
-				existing.disabled = false
-				existing.disabledAt = time.Time{}
-				existing.mu.Unlock()
-				// Persist mutated state to Redis (P1 fix: was missing SaveGrokAccount on existing-account update)
-				if grokAM.db != nil {
-					dbSaveGrokAccount(grokAM.db, existing)
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			grokAM.accounts = append(grokAM.accounts, acc)
-		}
-		total := len(grokAM.accounts)
-		grokAM.mu.Unlock()
+		_, total, acc := grokAM.UpsertAccount(req.Email, req.AccessToken, req.RefreshToken, req.IDToken, req.Sub, req.ExpiresIn)
 		slog.Info("imported account", "module", "grok", "email", req.Email, "total", total)
 		c.JSON(200, gin.H{
 			"status":  "imported",
@@ -358,57 +299,11 @@ func handleImportAccountBulk(grokAM *GrokAccountManager) gin.HandlerFunc {
 				failed++
 				continue
 			}
-			expiresIn := a.ExpiresIn
-			if expiresIn == 0 {
-				expiresIn = 21600
-			}
-			expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
-			acc := &GrokAccount{
-				Email:        a.Email,
-				AccessToken:  a.AccessToken,
-				RefreshToken: a.RefreshToken,
-				IDToken:      a.IDToken,
-				ExpiresIn:     expiresIn,
-				Expired:       expiresAt.Format(time.RFC3339),
-				LastRefresh:   time.Now().Format(time.RFC3339),
-				Sub:           a.Sub,
-				expiresAt:     expiresAt,
-				db:            grokAM.db,
-			}
-			if grokAM.db != nil {
-				dbSaveGrokAccount(grokAM.db, acc)
-			}
-			grokAM.mu.Lock()
-			found := false
-			for _, existing := range grokAM.accounts {
-				if existing.Email == a.Email {
-					existing.mu.Lock()
-					existing.AccessToken = a.AccessToken
-					existing.RefreshToken = a.RefreshToken
-					existing.IDToken = a.IDToken
-					existing.ExpiresIn = expiresIn
-					existing.Expired = acc.Expired
-					existing.LastRefresh = acc.LastRefresh
-					existing.Sub = a.Sub
-					existing.expiresAt = expiresAt
-					existing.disabled = false
-					existing.disabledAt = time.Time{}
-					existing.mu.Unlock()
-					if grokAM.db != nil {
-						dbSaveGrokAccount(grokAM.db, existing)
-					}
-					found = true
-					break
-				}
-			}
-			if !found {
-				grokAM.accounts = append(grokAM.accounts, acc)
-			}
-			grokAM.mu.Unlock()
-			if found {
-				updated++
-			} else {
+			created, _, _ := grokAM.UpsertAccount(a.Email, a.AccessToken, a.RefreshToken, a.IDToken, a.Sub, a.ExpiresIn)
+			if created {
 				added++
+			} else {
+				updated++
 			}
 		}
 		slog.Info("bulk import", "module", "grok", "added", added, "updated", updated, "failed", failed, "total", grokAM.Len())
@@ -429,18 +324,11 @@ func handleDeleteAccount(grokAM *GrokAccountManager) gin.HandlerFunc {
 			c.JSON(400, gin.H{"error": "email required"})
 			return
 		}
-		// Remove from Redis
-		grokAM.db.DeleteGrokAccount(email)
-		// Remove from runtime pool
-		grokAM.mu.Lock()
-		for i, acc := range grokAM.accounts {
-			if acc.Email == email {
-				grokAM.accounts = append(grokAM.accounts[:i], grokAM.accounts[i+1:]...)
-				break
-			}
+		if !grokAM.DeleteAccount(email) {
+			c.JSON(404, gin.H{"error": "account not found", "email": email})
+			return
 		}
-		remaining := len(grokAM.accounts)
-		grokAM.mu.Unlock()
+		remaining := grokAM.Len()
 		slog.Info("deleted account", "module", "grok", "email", email, "remaining", remaining)
 		c.JSON(200, gin.H{"status": "deleted", "email": email, "remaining": remaining})
 	}

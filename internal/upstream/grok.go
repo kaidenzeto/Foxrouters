@@ -1,4 +1,4 @@
-package main
+package upstream
 
 import (
 	"bytes"
@@ -15,11 +15,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/sync/singleflight"
+
+	"foxrouters/internal/db"
 )
 
 // refreshSF collapses concurrent Refresh() for the same account email.
 var refreshSF singleflight.Group
 
+// GrokAccount holds one OAuth session against auth.x.ai.
 type GrokAccount struct {
 	Email        string `json:"email"`
 	AccessToken  string `json:"access_token"`
@@ -33,13 +36,84 @@ type GrokAccount struct {
 	expiresAt    time.Time
 	disabled     bool
 	disabledAt   time.Time
-	db           *DBStore
+	db           *db.Store
+}
+
+// NewGrokAccountForTest returns a bare GrokAccount for whitebox tests.
+// Fields consumed by tests (expiresAt, disabled, disabledAt) are settable
+// via functional options.
+func NewGrokAccountForTest(email, access, refresh string, opts ...GrokAccountOption) *GrokAccount {
+	a := &GrokAccount{Email: email, AccessToken: access, RefreshToken: refresh, expiresAt: time.Now().Add(time.Hour)}
+	for _, o := range opts {
+		o(a)
+	}
+	return a
+}
+
+// GrokAccountOption mutates a test-only GrokAccount.
+type GrokAccountOption func(*GrokAccount)
+
+// WithExpiresAt sets the internal expiry stamp.
+func WithExpiresAt(t time.Time) GrokAccountOption { return func(a *GrokAccount) { a.expiresAt = t } }
+
+// WithDisabledCooldown marks the account disabled with a timestamp (cooldown).
+// Passing a zero time signals a permanent disable.
+func WithDisabledCooldown(at time.Time) GrokAccountOption {
+	return func(a *GrokAccount) { a.disabled = true; a.disabledAt = at }
 }
 
 func (a *GrokAccount) IsExpired() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return time.Now().After(a.expiresAt.Add(-REFRESH_BUFFER))
+}
+
+// GrokAccountSnapshot is a value copy of a GrokAccount for read-only use
+// (handlers, metrics). Fields mirror what the /accounts response needs.
+type GrokAccountSnapshot struct {
+	Email        string
+	Sub          string
+	AccessToken  string
+	RefreshToken string
+	IDToken      string
+	Expired      string
+	ExpiresIn    int
+	ExpiresAt    time.Time
+	LastRefresh  string
+	Disabled     bool
+	DisabledAt   time.Time
+	// TokenStatus is a convenience: "active" | "banned" | "cooldown" | "expired"
+	TokenStatus string
+}
+
+// Snapshot returns a mutex-safe copy of the account's current state.
+func (a *GrokAccount) Snapshot() GrokAccountSnapshot {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	s := GrokAccountSnapshot{
+		Email:        a.Email,
+		Sub:          a.Sub,
+		AccessToken:  a.AccessToken,
+		RefreshToken: a.RefreshToken,
+		IDToken:      a.IDToken,
+		Expired:      a.Expired,
+		ExpiresIn:    a.ExpiresIn,
+		ExpiresAt:    a.expiresAt,
+		LastRefresh:  a.LastRefresh,
+		Disabled:     a.disabled,
+		DisabledAt:   a.disabledAt,
+	}
+	switch {
+	case a.disabled && a.disabledAt.IsZero():
+		s.TokenStatus = "banned"
+	case a.disabled:
+		s.TokenStatus = "cooldown"
+	case time.Now().After(a.expiresAt.Add(-REFRESH_BUFFER)):
+		s.TokenStatus = "expired"
+	default:
+		s.TokenStatus = "active"
+	}
+	return s
 }
 
 func (a *GrokAccount) IsDisabled() bool {
@@ -64,7 +138,6 @@ func (a *GrokAccount) Refresh() error {
 }
 
 func (a *GrokAccount) refreshLocked() error {
-	// Snapshot credentials under lock — do not hold lock across network I/O.
 	a.mu.Lock()
 	email := a.Email
 	rt := a.RefreshToken
@@ -87,8 +160,6 @@ func (a *GrokAccount) refreshLocked() error {
 		return err
 	}
 	defer resp.Body.Close()
-	// Limit response body to 1MB — OAuth token responses are ~3-5KB,
-	// 1MB is 200x headroom. Prevents memory exhaustion from malformed responses.
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("refresh [%d]: %s", resp.StatusCode, string(body))
@@ -121,15 +192,13 @@ func (a *GrokAccount) refreshLocked() error {
 	a.mu.Unlock()
 
 	slog.Info("refresh ok", "module", "grok-refresh", "email", email, "expires_in_s", expIn)
-	// Persist outside lock (singleflight guarantees one writer per email)
 	if a.db != nil {
-		dbSaveGrokAccount(a.db, a)
-		dbUpsertGrokAccount(a.db, a)
-		a.db.LogRefresh(RefreshLog{
+		saveGrokAccount(a.db, a)
+		a.db.LogRefresh(db.RefreshLog{
 			Timestamp: time.Now(), AccountEmail: email, Provider: "grok",
 			Success: true,
 		})
-		a.db.LogEvent(AccountEvent{
+		a.db.LogEvent(db.AccountEvent{
 			Timestamp: time.Now(), AccountID: email, Provider: "grok",
 			EventType: "token_refreshed",
 		})
@@ -152,11 +221,33 @@ type GrokAccountManager struct {
 	accounts []*GrokAccount
 	mu       sync.RWMutex
 	next     int
-	db       *DBStore
+	db       *db.Store
 }
 
-func NewGrokAccountManager(db *DBStore) *GrokAccountManager {
-	return &GrokAccountManager{accounts: make([]*GrokAccount, 0), db: db}
+func NewGrokAccountManager(store *db.Store) *GrokAccountManager {
+	return &GrokAccountManager{accounts: make([]*GrokAccount, 0), db: store}
+}
+
+// DB returns the persistence handle (nil in test builds).
+func (am *GrokAccountManager) DB() *db.Store { return am.db }
+
+// SetAccountsForTest replaces the internal slice. Whitebox tests only.
+func (am *GrokAccountManager) SetAccountsForTest(accts []*GrokAccount) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.accounts = accts
+}
+
+// AddAccount appends an account. The account gets its db handle wired.
+// Callers should provide accounts constructed via NewGrokAccountForTest
+// (or freshly built structs in-package).
+func (am *GrokAccountManager) AddAccount(acc *GrokAccount) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	if am.db != nil && acc.db == nil {
+		acc.db = am.db
+	}
+	am.accounts = append(am.accounts, acc)
 }
 
 func (am *GrokAccountManager) Len() int {
@@ -268,7 +359,7 @@ func (am *GrokAccountManager) Next() (*GrokAccount, error) {
 		acc.mu.RUnlock()
 	}
 	if bestAcc != nil {
-		go bestAcc.Refresh() // singleflight inside Refresh
+		go bestAcc.Refresh()
 		am.next = (am.next + 1) % len(am.accounts)
 		return bestAcc, nil
 	}
@@ -283,9 +374,9 @@ func (am *GrokAccountManager) GetAll() []*GrokAccount {
 	return r
 }
 
-// reenableCooldowns lifts temp cooldowns past 10 minutes. Called by background
-// worker — NOT from Next() — so request path stays O(k) with no Redis I/O.
-func (am *GrokAccountManager) reenableCooldowns() {
+// ReenableCooldowns lifts temp cooldowns past 10 minutes. Called by
+// background worker only — request path stays O(k) with no Redis I/O.
+func (am *GrokAccountManager) ReenableCooldowns() {
 	accounts := am.GetAll()
 	now := time.Now()
 	var reenabled []*GrokAccount
@@ -299,27 +390,24 @@ func (am *GrokAccountManager) reenableCooldowns() {
 	}
 	for _, acc := range reenabled {
 		if acc.db != nil {
-			dbSaveGrokAccount(acc.db, acc)
+			saveGrokAccount(acc.db, acc)
 		}
 		slog.Info("re-enabled cooldown account", "module", "grok", "email", acc.Email)
 	}
 }
 
-func reenableWorker(am *GrokAccountManager) {
-	// Run once at start so recently-expired cooldowns recover quickly after restart
-	am.reenableCooldowns()
+// ReenableWorker is the long-lived goroutine that lifts cooldowns.
+func ReenableWorker(am *GrokAccountManager) {
+	am.ReenableCooldowns()
 	ticker := time.NewTicker(REENABLE_TICK)
 	defer ticker.Stop()
 	for range ticker.C {
-		am.reenableCooldowns()
+		am.ReenableCooldowns()
 	}
 }
 
-// ============================================================================
-// AUTO-REFRESH WORKER — pre-warm tokens concurrently, never block requests
-// ============================================================================
-
-func autoRefreshWorker(am *GrokAccountManager) {
+// AutoRefreshWorker pre-warms tokens concurrently before they expire.
+func AutoRefreshWorker(am *GrokAccountManager) {
 	ticker := time.NewTicker(PRE_WARM_TICK)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -350,7 +438,7 @@ func autoRefreshWorker(am *GrokAccountManager) {
 						acc.disabledAt = time.Time{}
 						acc.mu.Unlock()
 						if acc.db != nil {
-							dbSaveGrokAccount(acc.db, acc)
+							saveGrokAccount(acc.db, acc)
 						}
 						slog.Warn("account revoked, disabled", "module", "grok-worker", "email", acc.Email)
 					} else {
@@ -363,14 +451,118 @@ func autoRefreshWorker(am *GrokAccountManager) {
 	}
 }
 
+// ImportAccountRaw adds an account with raw token material (used by /accounts/import).
+// db handle is inherited from the manager. Returns the created account and true
+// if new, existing account and false if the email already exists (caller may
+// choose to update fields on the returned pointer).
+func (am *GrokAccountManager) ImportAccountRaw(email, accessToken, refreshToken, idToken string, expiresIn int) (*GrokAccount, bool) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	for _, existing := range am.accounts {
+		if existing.Email == email {
+			return existing, false
+		}
+	}
+	acc := &GrokAccount{
+		Email:        email,
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		IDToken:      idToken,
+		ExpiresIn:    expiresIn,
+		expiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
+		db:           am.db,
+	}
+	acc.Expired = acc.expiresAt.Format(time.RFC3339)
+	am.accounts = append(am.accounts, acc)
+	return acc, true
+}
+
+// UpsertAccount inserts or updates a Grok account by email. Fields are set
+// under the account mutex; Redis persistence runs after unlock. Returns the
+// full new pool size and whether the account was newly created.
+func (am *GrokAccountManager) UpsertAccount(email, accessToken, refreshToken, idToken, sub string, expiresIn int) (created bool, total int, acc *GrokAccount) {
+	if expiresIn == 0 {
+		expiresIn = 21600 // default 6h
+	}
+	expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+	expired := expiresAt.Format(time.RFC3339)
+	lastRefresh := time.Now().Format(time.RFC3339)
+
+	am.mu.Lock()
+	// existing?
+	for _, existing := range am.accounts {
+		if existing.Email == email {
+			existing.mu.Lock()
+			existing.AccessToken = accessToken
+			existing.RefreshToken = refreshToken
+			existing.IDToken = idToken
+			existing.ExpiresIn = expiresIn
+			existing.Expired = expired
+			existing.LastRefresh = lastRefresh
+			existing.Sub = sub
+			existing.expiresAt = expiresAt
+			existing.disabled = false
+			existing.disabledAt = time.Time{}
+			existing.mu.Unlock()
+			total = len(am.accounts)
+			am.mu.Unlock()
+			if am.db != nil {
+				saveGrokAccount(am.db, existing)
+			}
+			return false, total, existing
+		}
+	}
+	acc = &GrokAccount{
+		Email:        email,
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		IDToken:      idToken,
+		ExpiresIn:    expiresIn,
+		Expired:      expired,
+		LastRefresh:  lastRefresh,
+		Sub:          sub,
+		expiresAt:    expiresAt,
+		db:           am.db,
+	}
+	am.accounts = append(am.accounts, acc)
+	total = len(am.accounts)
+	am.mu.Unlock()
+	if am.db != nil {
+		saveGrokAccount(am.db, acc)
+	}
+	return true, total, acc
+}
+
+// DeleteAccount removes an account by email from memory + Redis.
+func (am *GrokAccountManager) DeleteAccount(email string) bool {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	for i, a := range am.accounts {
+		if a.Email == email {
+			am.accounts = append(am.accounts[:i], am.accounts[i+1:]...)
+			if am.db != nil {
+				am.db.DeleteGrokAccount(email)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateExisting persists mutations made to an existing GrokAccount pointer.
+// The caller mutated fields (tokens, expiry) under acc.mu already.
+func (am *GrokAccountManager) UpdateExisting(acc *GrokAccount) {
+	if am.db != nil {
+		saveGrokAccount(am.db, acc)
+	}
+}
+
 // ============================================================================
 // MODEL ROUTING + GROK PROXY
 // ============================================================================
 
-// expandGrokAlias maps grok-4.5-{high,medium,low,auto,none} → reasoning_effort value.
-// Returns (effort, true) if model is an alias, ("", false) otherwise.
-// Mirrors 9router's grok-cli thinkingConfig: options ["low","medium","high","xhigh"], default "high".
-func expandGrokAlias(model string) (string, bool) {
+// ExpandGrokAlias maps grok-4.5-{high,medium,low,auto,none,xhigh} → reasoning_effort.
+func ExpandGrokAlias(model string) (string, bool) {
 	switch model {
 	case "grok-4.5-high", "grok-4.5-xhigh":
 		return "high", true
@@ -387,7 +579,8 @@ func expandGrokAlias(model string) (string, bool) {
 	}
 }
 
-func isGrokModel(model string) bool {
+// IsGrokModel returns true if the model routes to the Grok upstream.
+func IsGrokModel(model string) bool {
 	return strings.HasPrefix(model, "grok-")
 }
 
@@ -396,14 +589,12 @@ func grokHeaders(token, accept, model string) http.Header {
 	h.Set("Authorization", "Bearer "+token)
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", accept)
-	// TUI-mimic headers (from grok-build source: inject_url_derived_headers)
 	h.Set("X-XAI-Token-Auth", "xai-grok-cli")
 	h.Set("x-authenticateresponse", "authenticate-response")
 	h.Set("x-grok-client-version", GROK_CLIENT_VERSION)
 	h.Set("x-grok-client-identifier", GROK_CLIENT_IDENTIFIER)
 	h.Set("x-grok-client-mode", "tui")
 	h.Set("User-Agent", fmt.Sprintf("grok-shell/%s (linux; x86_64)", GROK_CLIENT_VERSION))
-	// Per-request TUI headers (GrokRequestHeaders from xai-grok-sampler)
 	convID := fmt.Sprintf("conv-%d", time.Now().UnixNano())
 	reqID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	sessionID := fmt.Sprintf("sess-%d", time.Now().UnixNano())
@@ -416,9 +607,11 @@ func grokHeaders(token, accept, model string) http.Header {
 	return h
 }
 
-func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream bool, hc *HealthChecker, model string) {
-	if !hc.grok.CanRequest() {
-		hc.grok.RecordRequest(0, fmt.Errorf("circuit open"))
+// ProxyGrok forwards a chat/completions (or /v1/*) request to Grok, retrying
+// per-account on 401/403/5xx.
+func ProxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream bool, hc *HealthChecker, model string) {
+	if !hc.Grok.CanRequest() {
+		hc.Grok.RecordRequest(0, fmt.Errorf("circuit open"))
 		c.JSON(503, gin.H{"error": "grok upstream circuit breaker open"})
 		c.Set("error_msg", "grok circuit breaker open")
 		errJSON, _ := json.Marshal(gin.H{"error": "grok upstream circuit breaker open"})
@@ -439,7 +632,7 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 	}
 
 	client := upstreamClient
-	total := am.Len() // O(1) — no GetAll copy
+	total := am.Len()
 
 	var lastResp *http.Response
 	var lastAcc *GrokAccount
@@ -494,14 +687,14 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 			}
 			acc.mu.Unlock()
 			if acc.db != nil {
-				dbSaveGrokAccount(acc.db, acc)
+				saveGrokAccount(acc.db, acc)
 			}
 			continue
 		}
 
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
-			hc.grok.RecordRequest(time.Since(reqStart), fmt.Errorf("upstream %d", resp.StatusCode))
+			hc.Grok.RecordRequest(time.Since(reqStart), fmt.Errorf("upstream %d", resp.StatusCode))
 			slog.Warn("upstream error", "module", "grok", "email", acc.Email, "status", resp.StatusCode)
 			continue
 		}
@@ -513,14 +706,13 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 
 	if lastResp == nil {
 		c.JSON(503, gin.H{"error": "all grok accounts on cooldown"})
-		// Capture error for ClickHouse audit trail
 		c.Set("error_msg", "all grok accounts on cooldown")
 		errJSON, _ := json.Marshal(gin.H{"error": "all grok accounts on cooldown"})
 		c.Set("response_body", json.RawMessage(errJSON))
 		return
 	}
 
-	hc.grok.RecordRequest(time.Since(reqStart), nil)
+	hc.Grok.RecordRequest(time.Since(reqStart), nil)
 	c.Set("upstream_account", lastAcc.Email)
 
 	defer lastResp.Body.Close()
@@ -559,7 +751,6 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 				if flusher != nil {
 					flusher.Flush()
 				}
-				// Incremental line parse (carry partial lines across reads)
 				chunk := lineCarry + string(buf[:n])
 				parts := strings.Split(chunk, "\n")
 				lineCarry = parts[len(parts)-1]
@@ -572,7 +763,6 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 					if data == "[DONE]" || data == "" {
 						continue
 					}
-					// Single unmarshal with optional error field
 					var sc sseChunk
 					if json.Unmarshal([]byte(data), &sc) != nil {
 						continue
@@ -612,7 +802,6 @@ func proxyGrok(c *gin.Context, body []byte, am *GrokAccountManager, clientStream
 		})
 		c.Set("response_body", json.RawMessage(respJSON))
 	} else {
-		// Limit to 10MB — covers large completions but prevents OOM from runaway responses.
 		bodyBytes, _ := io.ReadAll(io.LimitReader(lastResp.Body, 10<<20))
 		c.Writer.Write(bodyBytes)
 		var result map[string]any
