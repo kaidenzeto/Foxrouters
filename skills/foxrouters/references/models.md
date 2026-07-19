@@ -16,10 +16,13 @@
 
 ## CodeBuddy Models (upstream: www.codebuddy.ai/v2)
 
-39 models total. Common ones:
+42 models total. Common ones:
 
 | Model ID | Family |
 |----------|--------|
+| `cb/gpt-5.6-sol` | OpenAI GPT-5.6 (newest) |
+| `cb/gpt-5.6-terra` | OpenAI GPT-5.6 (newest) |
+| `cb/gpt-5.6-luna` | OpenAI GPT-5.6 (newest) |
 | `cb/gpt-5.5` | OpenAI GPT |
 | `cb/gpt-5.2` | OpenAI GPT |
 | `cb/claude-opus-4.7` | Anthropic Claude |

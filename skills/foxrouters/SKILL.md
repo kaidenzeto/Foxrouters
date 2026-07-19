@@ -1,6 +1,6 @@
 ---
 name: foxrouters
-description: Interact with FoxRouters AI Gateway API — OpenAI-compatible proxy for Grok + CodeBuddy. Use when making LLM inference calls, managing API keys/accounts, or querying request history.
+description: Interact with FoxRouters AI Gateway API — OpenAI + Anthropic compatible proxy for Grok + CodeBuddy. Use when making LLM inference calls (OpenAI or Claude Code), managing API keys/accounts, or querying request history.
 version: 1.0.0
 tags: [ai-gateway, proxy, openai-compatible, grok, codebuddy, llm]
 ---
@@ -57,7 +57,7 @@ curl -s http://127.0.0.1:20130/v1/chat/completions \
 | Prefix | Upstream | Example models |
 |--------|----------|----------------|
 | `grok-*` | cli-chat-proxy.grok.com | `grok-4.5`, `grok-4.5-high`, `grok-4.5-medium`, `grok-4.5-low`, `grok-4.5-xhigh`, `grok-4.5-auto`, `grok-4.5-none` |
-| `cb/*` | www.codebuddy.ai/v2 | `cb/gpt-5.5`, `cb/claude-opus-4.7`, `cb/gemini-3.1-pro`, etc. (39 models) |
+| `cb/*` | www.codebuddy.ai/v2 | `cb/gpt-5.6-sol`, `cb/gpt-5.6-terra`, `cb/gpt-5.6-luna`, `cb/gpt-5.5`, `cb/claude-opus-4.7`, `cb/gemini-3.1-pro`, etc. (42 models) |
 
 **Grok aliases:** `grok-4.5-{high,medium,low,xhigh,auto,none}` → `grok-4.5` + `reasoning_effort` param.
 
@@ -72,6 +72,39 @@ curl -N http://127.0.0.1:20130/v1/chat/completions \
   -H "Authorization: Bearer $KEY" \
   -d '{"model":"cb/gpt-5.5","messages":[...],"stream":true}'
 ```
+
+### 1b. LLM Inference (Anthropic Messages API — Claude Code compatible)
+
+FoxRouters also exposes `POST /v1/messages` — the Anthropic Messages API format. This lets **Claude Code CLI** use FoxRouters as its backend.
+
+```bash
+curl -s http://127.0.0.1:20130/v1/messages \
+  -H "x-api-key: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4",
+    "max_tokens": 100,
+    "messages": [{"role":"user","content":"Hello"}]
+  }'
+```
+
+**Auth:** Accepts both `x-api-key` (Anthropic standard) and `Authorization: Bearer` (OpenAI standard).
+
+**Model mapping:**
+| Input model | Routes to |
+|-------------|-----------|
+| `claude-*` (default) | `cb/claude-sonnet-4` (CodeBuddy) |
+| `claude-*-grok` | `grok-4.5` (Grok) |
+| `cb/*` or `grok-*` (explicit) | passthrough |
+
+**Configure Claude Code:**
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:20130
+export ANTHROPIC_API_KEY=gw-xxx
+claude
+```
+
+**Streaming:** Returns Anthropic SSE event stream (`message_start`, `content_block_delta`, `message_stop`).
 
 ### 2. API Key Management (admin only)
 

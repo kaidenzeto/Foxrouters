@@ -215,6 +215,8 @@ Roles: **inference** may call `/v1/*` only; **admin** may call everything.
 | `DELETE` | `/cb/keys/:key` | admin | Delete a CodeBuddy key. |
 | `POST` | `/cleanup/disabled` | admin | Bulk-remove permanently disabled keys/accounts (`?type=all\|grok\|cb`). |
 | `GET`  | `/cb-stats` | admin | CodeBuddy per-key credit / usage stats. |
+| `GET`  | `/metrics` | **public** | Prometheus metrics (request count, duration, pool sizes, circuit state). |
+| `POST` | `/v1/messages` | inference+ | **Anthropic Messages API** (Claude Code compatible). Accepts `x-api-key` or `Authorization: Bearer`. |
 | `GET`  | `/api/keys` | admin | List gateway API keys. |
 | `POST` | `/api/keys` | admin | Create a gateway key (role, allowed_models, RPM, burst, quota). |
 | `PUT`  | `/api/keys` | admin | Update a gateway key. |
@@ -235,6 +237,34 @@ curl -s http://127.0.0.1:20130/v1/chat/completions \
     "messages": [{"role":"user","content":"hello"}]
   }'
 ```
+
+### Example: Anthropic Messages API (Claude Code)
+
+FoxRouters exposes `POST /v1/messages` — the Anthropic Messages API format. This lets **Claude Code CLI** use FoxRouters as its backend proxy → Grok/CodeBuddy.
+
+```bash
+curl -s http://127.0.0.1:20130/v1/messages \
+  -H "x-api-key: $GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4",
+    "max_tokens": 100,
+    "messages": [{"role":"user","content":"Hello"}]
+  }'
+```
+
+**Configure Claude Code to use FoxRouters:**
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:20130
+export ANTHROPIC_API_KEY=gw-xxx
+claude
+```
+
+**Model mapping:**
+- `claude-*` → `cb/claude-sonnet-4` (CodeBuddy, default)
+- `claude-*-grok` → `grok-4.5` (Grok upstream)
+- `cb/*` / `grok-*` explicit → passthrough
 
 ---
 

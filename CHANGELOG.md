@@ -8,6 +8,63 @@ Policy: **test (`go test -race`) before build/restart**. Secrets only via `.gate
 
 ---
 
+## v1.2.0 — Anthropic Messages API + GPT-5.6 + cleanup tooling (2026-07-19)
+
+### What changed
+
+| Area | Before | After |
+|------|--------|-------|
+| API format | OpenAI-only (`/v1/chat/completions`) | + **Anthropic Messages API** (`POST /v1/messages`) — Claude Code compatible |
+| Auth header | `Authorization: Bearer` only | + `x-api-key` (Anthropic standard) — both accepted |
+| Model catalog | 39 models | **42 models** — added `cb/gpt-5.6-sol`, `cb/gpt-5.6-terra`, `cb/gpt-5.6-luna` |
+| Key management | Grok delete + auth key delete only | + **CB key delete** (`DELETE /cb/keys/:key`) + **cleanup disabled** (`POST /cleanup/disabled?type=all\|grok\|cb`) |
+| Dashboard | View-only for CB keys | **Delete button** per CB key + per Grok account + **Cleanup Disabled** button |
+| Logging | `log.Printf` ad-hoc | **slog structured logging** (86 calls migrated, `LOG_LEVEL=debug\|warn\|error`) |
+| Metrics | None | **Prometheus `/metrics`** — `foxrouters_requests_total`, `request_duration_seconds`, `active_keys`, `disabled_keys`, `circuit_state` |
+| Version | Hardcoded `const Version = "5.11.2"` | **`-ldflags -X main.Version=<tag>`** — fallback `dev`, injected via Dockerfile + CI |
+| Code structure | Flat `package main` (5,441 LOC) | **7 `internal/` packages** — `metrics`, `ratelimit`, `db`, `auth`, `upstream`, `proxy`, `handlers` |
+| Tests | 22 unit tests | **38 tests** (22 unit + 16 integration) |
+| Shutdown drain | `time.Sleep(500ms)` | **`sync.WaitGroup`** with 10s timeout (no log loss) |
+| CB 429 handling | Permanent ban | **Cooldown 10min** (401 still permanent) |
+
+### New endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/v1/messages` | Anthropic Messages API (Claude Code compatible) |
+| `DELETE` | `/cb/keys/:key` | Delete a CodeBuddy key |
+| `POST` | `/cleanup/disabled?type=all\|grok\|cb` | Bulk-remove permanently disabled keys/accounts |
+| `GET` | `/metrics` | Prometheus metrics (public) |
+
+### Claude Code integration
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:20130
+export ANTHROPIC_API_KEY=gw-xxx
+claude
+```
+
+Model mapping: `claude-*` → `cb/claude-sonnet-4` (default), `*-grok` → `grok-4.5`, explicit `cb/*` / `grok-*` passthrough.
+
+### Commits
+```
+106a4d1 feat: add GPT-5.6 models + Anthropic Messages API adapter
+bd1975b feat: dashboard UI for delete CB key + cleanup disabled
+cc715b7 feat: add CB key delete + cleanup disabled endpoints
+3f37406 refactor: complete package split — main.go slim
+170b91f refactor: extract internal/handlers
+abaff4a refactor: extract internal/proxy
+8f2ca67 refactor: extract internal/upstream
+ffbe6a3 refactor: extract internal/auth
+63f3a4d refactor: extract internal/db
+c52e2cd refactor: extract internal/ratelimit
+dfce981 refactor: extract internal/metrics
+a7f5291 feat: version ldflags, slog structured logging, prometheus metrics, integration tests
+706bbbf fix: P1 audit issues (CH port, gin ctx, CB load error, CB 429 cooldown, shutdown drain)
+```
+
+---
+
 ## v5.11.2 — Security hardening + admin scope split (2026-07-18)
 
 ### What changed
