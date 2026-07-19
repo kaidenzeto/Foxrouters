@@ -193,6 +193,7 @@ func main() {
 			}
 			stats = append(stats, gin.H{
 				"key":            keyDisplay,
+				"key_full":       k.Key, // full key for admin delete operations
 				"credits_used":   credits,
 				"credit_limit":   CB_CREDIT_LIMIT,
 				"credits_left":   CB_CREDIT_LIMIT - credits,

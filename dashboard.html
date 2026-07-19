@@ -941,10 +941,6 @@ body {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       Custom Models
     </button>
-    <button class="nav-item" data-route="#/combos" onclick="navigateTo('#/combos')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
-      Combos
-    </button>
   </nav>
   <div class="sidebar-footer">
     <div class="status-row">
@@ -1167,6 +1163,12 @@ body {
 
     <!-- ════════ PAGE 4: MODELS ════════ -->
     <div class="page" id="page-models">
+      <div style="display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid var(--border-strong)">
+        <button id="mtab-models" onclick="switchMTab('models')" style="padding:10px 18px;background:none;border:none;border-bottom:2px solid var(--brand);color:var(--text-primary);font-size:13px;font-weight:500;cursor:pointer">Models</button>
+        <button id="mtab-combos" onclick="switchMTab('combos')" style="padding:10px 18px;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-tertiary);font-size:13px;font-weight:500;cursor:pointer">Combos</button>
+      </div>
+
+      <div id="mtab-pane-models">
       <div class="panel">
         <div class="panel-head">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
@@ -1185,6 +1187,62 @@ body {
             <div style="text-align:center;padding:32px;color:var(--text-tertiary);font-size:13px">Loading models...</div>
           </div>
         </div>
+      </div>
+      </div>
+
+      <div id="mtab-pane-combos" style="display:none">
+      <div class="panel">
+        <div class="panel-head">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+          <h3>Combos</h3>
+          <div style="margin-left:auto">
+            <button class="btn-ghost" onclick="loadCombos()" style="padding:5px 12px;font-size:12px">Refresh</button>
+          </div>
+        </div>
+        <div style="padding:16px">
+          <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:14px;line-height:1.5">
+            Group models under a single virtual name — call it as <code>combo/&lt;name&gt;</code>.
+            <strong>Fallback</strong> tries models in order (retry on 5xx). <strong>Round Robin</strong> rotates models across requests.
+          </div>
+          <div style="display:grid;grid-template-columns:1.5fr 1fr 3fr 2fr auto;gap:8px;margin-bottom:12px;align-items:end">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Name</label>
+              <input type="text" id="cbxName" placeholder="smart-fallback" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono)" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Strategy</label>
+              <select id="cbxStrategy" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px">
+                <option value="fallback">Fallback</option>
+                <option value="round_robin">Round Robin</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Models (one per line or comma-separated)</label>
+              <textarea id="cbxModels" rows="2" placeholder="cb/gpt-5.5&#10;cb/claude-sonnet-4.6&#10;grok-4.5" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono);resize:vertical"></textarea>
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Description (optional)</label>
+              <input type="text" id="cbxDesc" placeholder="GPT then Claude" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px" />
+            </div>
+            <button class="btn-primary" onclick="addCombo()" style="padding:7px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">+ Create</button>
+          </div>
+          <div id="cbxError" style="display:none;color:var(--red);font-size:12px;padding:6px 10px;background:rgba(255,80,80,0.08);border-radius:var(--radius-sm);margin-bottom:8px"></div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr style="background:var(--bg);color:var(--text-tertiary);text-align:left">
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Name</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Strategy</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Models</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Description</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong);width:1%"></th>
+              </tr>
+            </thead>
+            <tbody id="cbxTableBody">
+              <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-tertiary)">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       </div>
     </div>
 
@@ -1279,61 +1337,6 @@ body {
     </div>
 
     <!-- ════════ PAGE 6: COMBOS (admin, v1.4.0) ════════ -->
-    <div class="page" id="page-combos">
-      <div class="panel" style="margin-bottom:20px">
-        <div class="panel-head">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
-          <h3>Combos</h3>
-          <div style="margin-left:auto">
-            <button class="btn-ghost" onclick="loadCombos()" style="padding:5px 12px;font-size:12px">Refresh</button>
-          </div>
-        </div>
-        <div style="padding:16px">
-          <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:14px;line-height:1.5">
-            Group models under a single virtual name — call it as <code>combo/&lt;name&gt;</code>.
-            <strong>Fallback</strong> tries models in order (retry on 5xx). <strong>Round Robin</strong> rotates models across requests.
-          </div>
-          <div style="display:grid;grid-template-columns:1.5fr 1fr 3fr 2fr auto;gap:8px;margin-bottom:12px;align-items:end">
-            <div>
-              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Name</label>
-              <input type="text" id="cbxName" placeholder="smart-fallback" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono)" />
-            </div>
-            <div>
-              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Strategy</label>
-              <select id="cbxStrategy" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px">
-                <option value="fallback">Fallback</option>
-                <option value="round_robin">Round Robin</option>
-              </select>
-            </div>
-            <div>
-              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Models (one per line or comma-separated)</label>
-              <textarea id="cbxModels" rows="2" placeholder="cb/gpt-5.5&#10;cb/claude-sonnet-4.6&#10;grok-4.5" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono);resize:vertical"></textarea>
-            </div>
-            <div>
-              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Description (optional)</label>
-              <input type="text" id="cbxDesc" placeholder="GPT then Claude" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px" />
-            </div>
-            <button class="btn-primary" onclick="addCombo()" style="padding:7px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">+ Create</button>
-          </div>
-          <div id="cbxError" style="display:none;color:var(--red);font-size:12px;padding:6px 10px;background:rgba(255,80,80,0.08);border-radius:var(--radius-sm);margin-bottom:8px"></div>
-          <table style="width:100%;border-collapse:collapse;font-size:12px">
-            <thead>
-              <tr style="background:var(--bg);color:var(--text-tertiary);text-align:left">
-                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Name</th>
-                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Strategy</th>
-                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Models</th>
-                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Description</th>
-                <th style="padding:8px;border-bottom:1px solid var(--border-strong);width:1%"></th>
-              </tr>
-            </thead>
-            <tbody id="cbxTableBody">
-              <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-tertiary)">Loading...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
     <!-- Key Modal -->
     <div class="modal-overlay" id="keyModal" onclick="if(event.target===this)closeKeyModal()">
       <div class="modal-box" style="max-width:480px">
@@ -1491,8 +1494,7 @@ var routes = {
   '#/accounts': { page: 'page-accounts',  title: 'Accounts & Keys', meta: 'Live · auto-refresh 5s' },
   '#/keys':     { page: 'page-keys',      title: 'Gateway API Keys', meta: 'Redis-backed · CRUD' },
   '#/models':   { page: 'page-models',    title: 'Models', meta: 'Usage stats · aliases' },
-  '#/custom':   { page: 'page-custom',    title: 'Custom Models & Aliases', meta: 'Runtime-configurable · Redis-backed' },
-  '#/combos':   { page: 'page-combos',    title: 'Combos', meta: 'Fallback + round-robin · Redis-backed' }
+  '#/custom':   { page: 'page-custom',    title: 'Custom Models & Aliases', meta: 'Runtime-configurable · Redis-backed' }
 };
 
 function navigateTo(hash) {
@@ -1528,9 +1530,6 @@ function router() {
   if (hash === '#/custom') {
     loadCustomModels();
     loadAliases();
-  }
-  if (hash === '#/combos') {
-    loadCombos();
   }
 }
 
@@ -2132,6 +2131,27 @@ var aliasMap = {
   'grok-4.5-low':    { upstream: 'grok-4.5', effort: 'low' },
   'grok-4.5-xhigh': { upstream: 'grok-4.5', effort: 'high' }
 };
+
+function switchMTab(tab) {
+  var panes = ['models', 'combos'];
+  panes.forEach(function(t) {
+    var pane = document.getElementById('mtab-pane-' + t);
+    var btn = document.getElementById('mtab-' + t);
+    if (!pane || !btn) return;
+    if (t === tab) {
+      pane.style.display = '';
+      btn.style.borderBottom = '2px solid var(--brand)';
+      btn.style.color = 'var(--text-primary)';
+    } else {
+      pane.style.display = 'none';
+      btn.style.borderBottom = '2px solid transparent';
+      btn.style.color = 'var(--text-tertiary)';
+    }
+  });
+  if (tab === 'combos') {
+    loadCombos();
+  }
+}
 
 async function loadModels() {
   var container = document.getElementById('modelsContainer');
