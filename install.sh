@@ -184,37 +184,27 @@ docker run -d \
     "${IMAGE_GATEWAY}"
 ok "FoxRouters started (port ${GATEWAY_PORT})"
 
-# ── Step 9: Capture bootstrap key ───────────────────────────────────────────
-info "Waiting for gateway to bootstrap (up to 30s)..."
+# ── Step 9: Capture gateway key from Redis ──────────────────────────────────
+# Redis is the single source of truth. Gateway writes the bootstrap key to
+# Redis on first boot, or loads existing keys on re-deploy. Either way,
+# the full (unmasked) key is in HASH gw:key:* field "key".
+info "Waiting for gateway to write key to Redis (up to 30s)..."
 BOOTSTRAP_KEY=""
 for i in $(seq 1 30); do
-    # Gateway key format: gw-<43 chars> (alphanumeric + _ + -)
-    BOOTSTRAP_KEY=$(docker logs foxrouters 2>&1 | grep -oP 'gw-[A-Za-z0-9_-]{43}' | head -1 || true)
-    if [[ -n "${BOOTSTRAP_KEY}" ]]; then
-        break
+    EXISTING_KEY=$(docker exec foxrouters-redis redis-cli -a "${REDIS_PASSWORD}" --scan --pattern 'gw:key:*' 2>/dev/null | head -1 || true)
+    if [[ -n "${EXISTING_KEY}" ]]; then
+        BOOTSTRAP_KEY=$(docker exec foxrouters-redis redis-cli -a "${REDIS_PASSWORD}" hget "${EXISTING_KEY}" key 2>/dev/null | tr -d '\r\n' || true)
+        if [[ -n "${BOOTSTRAP_KEY}" ]]; then
+            break
+        fi
     fi
     printf "."
     sleep 1
 done
 
 if [[ -z "${BOOTSTRAP_KEY}" ]]; then
-    # Re-deploy scenario: Redis already has gateway keys from previous install.
-    # Fetch the full (unmasked) key directly from Redis.
-    info "No bootstrap key in logs — checking Redis for existing keys..."
-    EXISTING_KEY=$(docker exec foxrouters-redis redis-cli -a "${REDIS_PASSWORD}" --scan --pattern 'gw:key:*' 2>/dev/null | head -1 || true)
-    if [[ -n "${EXISTING_KEY}" ]]; then
-        # Extract full key from Redis HASH field "key" (not key_masked)
-        BOOTSTRAP_KEY=$(docker exec foxrouters-redis redis-cli -a "${REDIS_PASSWORD}" hget "${EXISTING_KEY}" key 2>/dev/null | tr -d '\r\n' || true)
-        if [[ -n "${BOOTSTRAP_KEY}" ]]; then
-            yellow "Re-deploy detected — using existing gateway key from Redis."
-        fi
-    fi
-fi
-
-if [[ -z "${BOOTSTRAP_KEY}" ]]; then
-    err "Gateway did not bootstrap a key within 30s."
+    err "Gateway did not write a key to Redis within 30s."
     err "Check logs: docker logs foxrouters"
-    err "If Redis has stale data, reset: docker volume rm ${VOL_REDIS} && ./install.sh"
     exit 1
 fi
 
