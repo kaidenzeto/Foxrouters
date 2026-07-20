@@ -2,9 +2,43 @@
 
 **Service:** `foxrouters.service` · port **20130** · binary `foxrouters`  
 **Repo:** `/root/nexus-workspace/foxrouters/`  
-**Live version:** `const Version` in `main.go` (currently **v1.4.8-health-session**)
+**Live version:** `const Version` in `main.go` (currently **v1.5.0**)
 
 Policy: **test (`go test -race`) before build/restart**. Secrets only via `.gateway.env` (gitignored).
+
+---
+
+## v1.5.0 — Proxy Pool Manager + Security Audit Fixes (2026-07-20)
+
+### Added
+
+| Feature | Description |
+|---------|-------------|
+| **Proxy pool manager** | Dashboard-managed HTTP/SOCKS5 proxy pool with round-robin rotation. All upstream calls (Grok chat, CodeBuddy chat, token refresh, health checks) route through enabled proxies. Redis-backed CRUD, auto-disable after 5 consecutive failures, proxy test endpoint. |
+| **Per-upstream proxy scoping** | Each proxy carries an `upstreams` list (`all` / `grok` / `codebuddy`). `ProxyPool.Next(upstream)` filters by scope — assign a proxy to Grok only, CodeBuddy only, or both. Backward compatible (old entries default `["all"]`). |
+| **Dashboard Proxies page** | New `#/proxies` nav route — stats cards, proxy pool table with upstream badges, add/edit modal with upstream checkboxes, test/toggle/delete actions. |
+
+### Fixed (security audit — 17 bugs across 3 tracks)
+
+| Track | Fixes |
+|-------|-------|
+| **P0 data races (3)** | C1: `saveGrokAccount` reads fields after `Unlock()` (7 call sites) → `toDTO()` snapshot under RLock. C2: `saveCBKey` reads fields after `Unlock()` (5 sites) → capture locals inside lock. C3: `Manager.Get()` returns `*GatewayKeyInfo` pointer → changed to value-type `GatewayKeySnapshot` + per-key RWMutex. C5: `IncrementTokens` reads `info.Disabled` after unlock → capture inside lock. |
+| **P1 concurrency (5)** | C6: SSE stream no client-cancel check → `ctx.Err()` + writer error check. C8: 401 double-fault after refresh → permanent disable. C9: `bufferedWriter` header copy clobbers middleware headers → `Add()` merge. C10: combo fallback no ctx propagation → `NewRequestWithContext`. |
+| **P1+P2 dashboard+logs (7)** | D1: stored XSS via custom model id in `onclick` → `data-*` + delegated handler. D2: login redirect loop for inference-role users → admin-only gate. D3: dead Test button in cookie mode → conditional Bearer header. D7: `apiFetch` returns undefined on 401 → throw sentinel. D8: uncleared poll intervals → `_stopped` guard. S1: full API keys in Redis error logs → `maskRedisKey()`. S2: bootstrap admin key in logs → `MaskKey()`. |
+| **Dashboard fixes** | `loadProxies` ReferenceError (typeof guard), scroll-to-top on page change, page-proxies rendered outside `div.content` (broken div nesting), proxies page UI (inline form → modal). |
+
+### Security audit summary
+
+| Round | Scope | Findings | Fixed |
+|-------|-------|----------|-------|
+| v1.4.6–v1.4.8 | Auth, session, CSRF, XSS, limiter | 12 items | 12/12 ✅ |
+| v1.5.0 (3-track) | Data races, concurrency, dashboard, logs | 17 bugs (3 P0 + 6 P1 + 8 P2) | 17/17 ✅ |
+| v1.5.0 (proxy pool) | SSRF, credential leak, injection, authz, races | 3 P3 defense-in-depth | 0 (accepted risk) |
+
+### Files changed (v1.5.0)
+
+**New:** `internal/proxy/pool.go`, `internal/handlers/proxies.go`, `proxy_pool_test.go`  
+**Modified:** `internal/db/db.go`, `internal/upstream/{upstream,grok,codebuddy,health}.go`, `internal/auth/auth.go`, `internal/handlers/handlers.go`, `internal/proxy/{buffered_writer,proxy}.go`, `main.go`, `dashboard.html`, `go.mod`
 
 ---
 
