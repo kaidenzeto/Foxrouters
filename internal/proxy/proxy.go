@@ -293,7 +293,7 @@ func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 		// Supports glob: "grok-*", "cb/*", or exact "cb/gpt-5.5".
 		fullKey := c.GetString("client_key")
 		if fullKey != "" && authMgr != nil {
-			if info := authMgr.Get(fullKey); info != nil {
+			if info, ok := authMgr.Get(fullKey); ok {
 				if !info.IsModelAllowed(model) {
 					c.JSON(403, gin.H{
 						"error": "model not allowed for this API key",

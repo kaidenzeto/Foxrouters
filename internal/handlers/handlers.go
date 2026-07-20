@@ -81,9 +81,8 @@ func HandleHealth(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 		if os.Getenv("GATEWAY_AUTH_DISABLE") == "1" {
 			authed = true
 		} else if a := c.GetHeader("Authorization"); strings.HasPrefix(a, "Bearer ") {
-			if info := am.Get(a[7:]); info != nil {
+			if _, ok := am.Get(a[7:]); ok {
 				authed = true
-				_ = info
 			}
 		} else if ck, err := c.Cookie("foxrouters_session"); err == nil && ck != "" {
 			// P3-3: cookie is now a session token, resolve to API key.
@@ -94,9 +93,8 @@ func HandleHealth(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 				key = ck // legacy fallback (pre-P3-3)
 			}
 			if key != "" {
-				if info := am.Get(key); info != nil {
+				if _, ok := am.Get(key); ok {
 					authed = true
-					_ = info
 				}
 			}
 		}
@@ -555,8 +553,8 @@ func HandleDeleteKey(am *auth.Manager) gin.HandlerFunc {
 		}
 		// P3-1: prevent last-admin lockout (self-DoS).
 		// Refuse to delete if this key is admin AND it's the only admin left.
-		info := am.Get(fullKey)
-		if info != nil && info.Role == auth.RoleAdmin && am.CountAdmins() <= 1 {
+		info, ok := am.Get(fullKey)
+		if ok && info.Role == auth.RoleAdmin && am.CountAdmins() <= 1 {
 			c.JSON(409, gin.H{"error": "cannot delete the last admin key — create another admin key first"})
 			return
 		}
@@ -627,7 +625,7 @@ func HandleUpdateKey(am *auth.Manager) gin.HandlerFunc {
 			c.JSON(404, gin.H{"error": "key not found"})
 			return
 		}
-		info := am.Get(fullKey)
+		info, _ := am.Get(fullKey)
 		slog.Info("updated key", "module", "auth", "key", auth.MaskKey(fullKey))
 		c.JSON(200, gin.H{
 			"key_masked":     auth.MaskKey(info.Key),
@@ -654,7 +652,7 @@ func HandleKeyUsage(am *auth.Manager) gin.HandlerFunc {
 			c.JSON(404, gin.H{"error": "key not found"})
 			return
 		}
-		info := am.Get(fullKey)
+		info, _ := am.Get(fullKey)
 		c.JSON(200, gin.H{
 			"key_masked":     auth.MaskKey(info.Key),
 			"name":           info.Name,
@@ -725,7 +723,7 @@ func HandleLogin(am *auth.Manager, sessions *auth.SessionStore) gin.HandlerFunc 
 		// call /v1/* with a Bearer token, but the dashboard endpoints are
 		// admin-only — letting them in produces a redirect loop (dashboard XHR
 		// gets 401 → JS redirects to /login → login succeeds → loop).
-		if info := am.Get(req.Key); info == nil || info.Role != auth.RoleAdmin {
+		if info, ok := am.Get(req.Key); !ok || info.Role != auth.RoleAdmin {
 			c.Data(200, "text/html; charset=utf-8", []byte(loginPageHTMLWithError("This key does not have dashboard access (admin role required)")))
 			return
 		}

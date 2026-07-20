@@ -120,26 +120,14 @@ func setCircuitState(upstream string, state CircuitState) {
 	metrics.SetCircuitState(upstream, v)
 }
 
-// SaveGrokAccount converts a GrokAccount to a db.GrokAccountDTO and persists.
-// Package-internal helper (used by grok.go). Kept here so callers don't
-// need to import internal/db just to save.
-func saveGrokAccount(s *db.Store, acc *GrokAccount) {
-	if s == nil || acc == nil {
+// saveGrokAccount persists a Grok account snapshot to Redis.
+// The DTO must be built under the account's lock (via GrokAccount.toDTO)
+// so we never read GrokAccount fields concurrently with a writer.
+func saveGrokAccount(s *db.Store, dto db.GrokAccountDTO) {
+	if s == nil {
 		return
 	}
-	s.SaveGrokAccount(db.GrokAccountDTO{
-		Email:        acc.Email,
-		AccessToken:  acc.AccessToken,
-		RefreshToken: acc.RefreshToken,
-		IDToken:      acc.IDToken,
-		ExpiresAt:    acc.expiresAt,
-		ExpiresIn:    acc.ExpiresIn,
-		Expired:      acc.Expired,
-		LastRefresh:  acc.LastRefresh,
-		Sub:          acc.Sub,
-		Disabled:     acc.disabled,
-		DisabledAt:   acc.disabledAt,
-	})
+	s.SaveGrokAccount(dto)
 }
 
 // saveCBKey persists CB pool state via a db.CBKeyDTO.
