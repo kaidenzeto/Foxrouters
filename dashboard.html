@@ -1701,7 +1701,7 @@ function router() {
     loadModels();
   }
   if (hash === '#/proxies') {
-    loadProxies();
+    if (typeof loadProxies === 'function') loadProxies();
   }
 }
 
