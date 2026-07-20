@@ -168,6 +168,7 @@ func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 				{"id": "cb/deepseek-v3.2", "object": "model", "owned_by": "codebuddy"},
 				// CodeBuddy — Kimi
 				{"id": "cb/kimi-k2.5", "object": "model", "owned_by": "codebuddy"},
+				{"id": "cb/kimi-k3", "object": "model", "owned_by": "codebuddy"},
 				// CodeBuddy — Default
 				{"id": "cb/default-model", "object": "model", "owned_by": "codebuddy"},
 			}
