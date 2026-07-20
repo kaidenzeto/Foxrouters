@@ -79,27 +79,62 @@ every request/response to ClickHouse — all behind a single Bearer token.
 
 ---
 
-## Quick Start (Docker — Pre-built Image)
+## Quick Start (One-Liner Installer — No Compose Needed)
 
-> Fastest path. No clone, no build — pulls image from ghcr.io.
+> Fastest path. Auto-installs Docker if missing, pulls all images, starts
+> Redis + ClickHouse + FoxRouters. No clone, no build, no docker-compose.
 
 ```bash
-curl -sL https://raw.githubusercontent.com/rilspratama/Foxrouters/master/deploy.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rilspratama/Foxrouters/master/install.sh | bash
 ```
 
 **Output:**
 ```
-🔑 Admin Bootstrap Key
-  Key:    gw-a94c7befdb14cd6d2...819edd11
-  Login:  http://localhost:20130/login
+[✓] Docker found: Docker version 29.6.1
+[✓] Secrets generated → /etc/foxrouters/.env
+[✓] Redis started (port 6379)
+[✓] ClickHouse started (HTTP 8123, Native 9000)
+[✓] FoxRouters started (port 20130)
+[✓] Gateway key captured → /etc/foxrouters/gateway-key.txt
+[✓] Gateway healthy: {"service":"foxrouters","status":"healthy","version":"v1.5.0"}
+
+═══════════════════════════════════════════════════════════════
+  FoxRouters installed successfully!
+═══════════════════════════════════════════════════════════════
+
+  Gateway Key:  gw-a94c7befdb14cd6d2...
+
+  Dashboard:    http://<host-ip>:20130/dashboard
+  API Base:     http://localhost:20130/v1/chat/completions
+  Config:       /etc/foxrouters/.env
+
+  Manage:
+    docker logs foxrouters -f
+    docker restart foxrouters
+    docker stop foxrouters-redis foxrouters-clickhouse foxrouters
+═══════════════════════════════════════════════════════════════
 ```
 
-Or manual:
+**Custom ports** (optional):
 ```bash
-curl -sLO https://raw.githubusercontent.com/rilspratama/Foxrouters/master/docker-compose.ghcr.yml
-docker compose -f docker-compose.ghcr.yml up -d
-docker compose -f docker-compose.ghcr.yml logs foxrouters | grep "Key: gw-"
+FOXROUTERS_PORT=8080 REDIS_PORT=6380 bash install.sh
 ```
+
+**Manage after install:**
+```bash
+docker logs foxrouters -f                                    # tail logs
+docker restart foxrouters                                     # restart gateway
+docker stop foxrouters-redis foxrouters-clickhouse foxrouters  # stop all
+docker start foxrouters-redis foxrouters-clickhouse foxrouters  # start all
+docker rm -f foxrouters foxrouters-redis foxrouters-clickhouse  # remove (keeps data)
+docker volume rm foxrouters-redis-data foxrouters-clickhouse-data  # wipe data
+```
+
+---
+
+## Quick Start (Docker Compose — For Development)
+
+> Clone + build from source. Uses `docker-compose.yml` with build context.
 
 Open `http://localhost:20130/login`, paste the key, done.
 
