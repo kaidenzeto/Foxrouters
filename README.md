@@ -1,8 +1,10 @@
 # FoxRouters
 
-[![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/go-1.25.12%2B-00ADD8?logo=go)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](#license)
-[![Version](https://img.shields.io/badge/version-5.11.2-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.5.0-blue)](./CHANGELOG.md)
+[![Security](https://img.shields.io/badge/security-audited%203x-brightgreen)](./CHANGELOG.md)
+[![Tests](https://img.shields.io/badge/tests-62%2F62%20PASS%20(%2Brace)-success)](./)
 
 Unified **OpenAI-compatible** API gateway that fronts **Grok** and **CodeBuddy** behind
 one `/v1/chat/completions` endpoint. Route by model prefix, round-robin across many
@@ -41,16 +43,32 @@ every request/response to ClickHouse — all behind a single Bearer token.
   up to 10 concurrent refreshes.
 - **Circuit breaker** — passive (401/403/credit/`14018` disable + Redis persist)
   and active health checks every ~10 min.
-- **API-key auth** with role-based access — `inference` (default) can only reach
-  `/v1/*`; `admin` reaches everything.
+- **Custom models + aliases** (v1.3.0) — runtime-configurable model aliases
+  (`cb/kimi-k3` → `cb/gpt-5.5`) backed by Redis, no restart needed.
+- **Combos** (v1.4.0) — group N models under `combo/<name>` virtual alias with
+  **fallback** or **round_robin** strategy. Round-robin uses atomic Redis `INCR`
+  (cluster-safe).
+- **Proxy pool manager** (v1.5.0) — dashboard-managed HTTP/SOCKS5 proxy pool with
+  round-robin rotation. All upstream calls (Grok, CodeBuddy, token refresh, health
+  checks) route through enabled proxies. **Per-upstream scoping** — assign a proxy
+  to Grok only, CodeBuddy only, or both. Auto-disable after 5 consecutive failures.
+  Proxy test endpoint with latency + exit IP.
+- **API-key auth** with role-based access — `inference` (default, least privilege)
+  can only reach `/v1/*`; `admin` reaches everything.
 - **Per-key model whitelist** with glob patterns (`grok-*`, `cb/*`, exact match).
 - **Per-key rate limits** — RPM, burst, and cumulative token quota.
 - **Redis hot state** — tokens, CB credits, disabled flags, gateway keys,
   rate/quota counters.
 - **ClickHouse history** — full request + response JSON, ZSTD compression,
   90-day TTL, unlimited body length; refresh events and disable events too.
-- **Web dashboard** — 4 SPA pages (stats, accounts, keys, models) served from an
-  embedded HTML file (no live gateway key ever injected server-side).
+- **Web dashboard** — 5 nav items (Dashboard, Accounts & Keys, Gateway API Keys,
+  Models, Proxies) with Models page containing 3 tabs (Models \| Custom \| Combos)
+  and Proxies page with upstream badges + add/edit modal.
+- **Security hardened** (v1.4.6–v1.5.0, 3x audited) — XSS-safe `data-*` event
+  delegation, CSRF guard (Origin/Referer check), session token indirection
+  (cookie ≠ API key), login rate limit (IP-based, XFF-proof), input validation
+  regex, last-admin lockout guard, `Secure`+`HttpOnly`+`SameSite=Lax` cookies,
+  data-race-free snapshot pattern for all pool types, API key masking in logs.
 - **Security headers** — CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options:
   nosniff`, `Referrer-Policy`.
 - **systemd hardening** — `NoNewPrivileges`, `ProtectSystem`, `ProtectHome`,
@@ -61,27 +79,62 @@ every request/response to ClickHouse — all behind a single Bearer token.
 
 ---
 
-## Quick Start (Docker — Pre-built Image)
+## Quick Start (One-Liner Installer — No Compose Needed)
 
-> Fastest path. No clone, no build — pulls image from ghcr.io.
+> Fastest path. Auto-installs Docker if missing, pulls all images, starts
+> Redis + ClickHouse + FoxRouters. No clone, no build, no docker-compose.
 
 ```bash
-curl -sL https://raw.githubusercontent.com/rilspratama/Foxrouters/master/deploy.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rilspratama/Foxrouters/master/install.sh | bash
 ```
 
 **Output:**
 ```
-🔑 Admin Bootstrap Key
-  Key:    gw-a94c7befdb14cd6d2...819edd11
-  Login:  http://localhost:20130/login
+[✓] Docker found: Docker version 29.6.1
+[✓] Secrets generated → /etc/foxrouters/.env
+[✓] Redis started (port 6379)
+[✓] ClickHouse started (HTTP 8123, Native 9000)
+[✓] FoxRouters started (port 20130)
+[✓] Gateway key captured → /etc/foxrouters/gateway-key.txt
+[✓] Gateway healthy: {"service":"foxrouters","status":"healthy","version":"v1.5.0"}
+
+═══════════════════════════════════════════════════════════════
+  FoxRouters installed successfully!
+═══════════════════════════════════════════════════════════════
+
+  Gateway Key:  gw-a94c7befdb14cd6d2...
+
+  Dashboard:    http://<host-ip>:20130/dashboard
+  API Base:     http://localhost:20130/v1/chat/completions
+  Config:       /etc/foxrouters/.env
+
+  Manage:
+    docker logs foxrouters -f
+    docker restart foxrouters
+    docker stop foxrouters-redis foxrouters-clickhouse foxrouters
+═══════════════════════════════════════════════════════════════
 ```
 
-Or manual:
+**Custom ports** (optional):
 ```bash
-curl -sLO https://raw.githubusercontent.com/rilspratama/Foxrouters/master/docker-compose.ghcr.yml
-docker compose -f docker-compose.ghcr.yml up -d
-docker compose -f docker-compose.ghcr.yml logs foxrouters | grep "Key: gw-"
+FOXROUTERS_PORT=8080 REDIS_PORT=6380 bash install.sh
 ```
+
+**Manage after install:**
+```bash
+docker logs foxrouters -f                                    # tail logs
+docker restart foxrouters                                     # restart gateway
+docker stop foxrouters-redis foxrouters-clickhouse foxrouters  # stop all
+docker start foxrouters-redis foxrouters-clickhouse foxrouters  # start all
+docker rm -f foxrouters foxrouters-redis foxrouters-clickhouse  # remove (keeps data)
+docker volume rm foxrouters-redis-data foxrouters-clickhouse-data  # wipe data
+```
+
+---
+
+## Quick Start (Docker Compose — For Development)
+
+> Clone + build from source. Uses `docker-compose.yml` with build context.
 
 Open `http://localhost:20130/login`, paste the key, done.
 
@@ -192,6 +245,7 @@ startup).
 | `CB_KEY_FILE` | `./cb-keys.json` | Path to a JSON file of CodeBuddy keys to seed. |
 | `CPA_AUTH_DIR` | `./` | Directory scanned for `xai-*.json` Grok credential files at boot. |
 | `GATEWAY_AUTH_DISABLE` | `false` | **Dev only.** When `true`, bypasses auth on all routes. Never enable in production. |
+| `COOKIE_SECURE` | `1` | Session cookie `Secure` flag. Set to `0` for dev HTTP (localhost). Default `1` = HTTPS-only. |
 
 > **Do not** commit secrets. Put the `.env` outside the repo or use `chmod 600
 > .gateway.env` alongside `.gitignore`.
@@ -202,6 +256,15 @@ startup).
 
 Unless noted, all endpoints require `Authorization: Bearer <gateway-key>`.
 Roles: **inference** may call `/v1/*` only; **admin** may call everything.
+
+**Auth flow:**
+- **API clients:** `Authorization: Bearer gw-...` header (preferred).
+- **Dashboard:** session cookie (`foxrouters_session`) — random 256-bit token
+  bound to API key server-side (NOT the raw key). 7-day TTL, sliding window.
+- **Login:** `POST /login` with `key=gw-...` form body. Rate-limited 5/min per IP
+  (XFF-spoof-proof via `SetTrustedProxies(nil)`).
+- **CSRF:** cookie-authed mutations (POST/PUT/DELETE) require same-origin
+  `Origin`/`Referer`. Bearer-authed calls are exempt.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -230,6 +293,10 @@ Roles: **inference** may call `/v1/*` only; **admin** may call everything.
 | `GET`  | `/api/aliases` | admin | List model aliases. |
 | `POST` | `/api/aliases` | admin | Create alias: `{alias, target}` (e.g. `my-claude` → `cb/claude-sonnet-4.6`). |
 | `DELETE` | `/api/aliases/:alias` | admin | Delete an alias. |
+| `GET`  | `/api/combos` | admin | List combos (v1.4.0). |
+| `POST` | `/api/combos` | admin | Create combo: `{name, strategy, models[], description?}` — strategy is `fallback` or `round_robin`. |
+| `GET`  | `/api/combos/*name` | admin | Fetch one combo. |
+| `DELETE` | `/api/combos/*name` | admin | Delete combo + its round-robin counter. |
 
 ### Example: chat completion
 
@@ -306,6 +373,52 @@ Aliases are checked **before** the default `grok-*` / `cb/*` routing, so they
 also work for the Anthropic Messages API — `mapAnthropicModel` consults
 aliases first.
 
+### Example: combos (v1.4.0)
+
+Group multiple models under a virtual `combo/<name>` alias with automatic
+failover or load-spreading:
+
+```bash
+ADMIN_KEY=<your-admin-gateway-key>
+CLIENT_KEY=<any-gateway-key>
+
+# 1. Create a Fallback combo — tries models in order, retries next on 5xx
+curl -s -X POST http://127.0.0.1:20130/api/combos \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{"name":"smart-fallback","strategy":"fallback",
+       "models":["cb/gpt-5.5","cb/claude-sonnet-4.6","grok-4.5"],
+       "description":"GPT then Claude then Grok"}'
+
+# 2. Create a Round Robin combo — rotates models across requests
+curl -s -X POST http://127.0.0.1:20130/api/combos \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{"name":"rr-pool","strategy":"round_robin",
+       "models":["cb/gpt-5.5","cb/claude-sonnet-4.6"]}'
+
+# 3. Use them — client just calls combo/<name>
+curl -s -X POST http://127.0.0.1:20130/v1/chat/completions \
+  -H "Authorization: Bearer $CLIENT_KEY" -H "content-type: application/json" \
+  -d '{"model":"combo/smart-fallback","messages":[{"role":"user","content":"hi"}]}'
+
+# 4. Combos appear in /v1/models
+curl -s http://127.0.0.1:20130/v1/models -H "Authorization: Bearer $CLIENT_KEY" \
+  | jq '.data[] | select(.id | startswith("combo/"))'
+
+# 5. Cleanup
+curl -s -X DELETE http://127.0.0.1:20130/api/combos/smart-fallback \
+  -H "Authorization: Bearer $ADMIN_KEY"
+curl -s -X DELETE http://127.0.0.1:20130/api/combos/rr-pool \
+  -H "Authorization: Bearer $ADMIN_KEY"
+```
+
+**Fallback semantics**
+- Non-streaming: on 5xx from `models[i]`, response is buffered + discarded, next model tried. 4xx returns immediately (client error).
+- Streaming (SSE): head-of-list model only — bytes already on the wire can't be retried.
+
+**Round-robin semantics**
+- Atomic `INCR combo:counter:<name>` (Redis) — cluster-safe fair rotation.
+- Counter is auto-deleted when the combo is deleted.
+
 ---
 
 ## Authentication
@@ -361,17 +474,18 @@ If the client already sets `reasoning_effort` explicitly, the client value wins.
 
 ## Dashboard
 
-Served at `GET /dashboard` (public HTML; XHRs still require a gateway key stored
-in `localStorage` or provided as `?key=`). The SPA has four routes:
+Served at `GET /dashboard` (public HTML; XHRs still require a gateway key via
+session cookie or `?key=`). The SPA has four nav routes:
 
 | Route | Page |
 |---|---|
-| `#/` | **Stats** — health, request counts, token totals, recent history preview. |
-| `#/accounts` | **Accounts** — Grok accounts + CodeBuddy keys with pagination and enable/disable/refresh. |
-| `#/keys` | **Keys** — Gateway key CRUD, role picker, allowed-models selector, RPM/burst/quota inputs. |
-| `#/models` | **Models** — model list with usage stats. |
+| `#/` | **Dashboard** — health, request counts, token totals, recent history preview. |
+| `#/accounts` | **Accounts & Keys** — Grok accounts + CodeBuddy keys with pagination and enable/disable/refresh. |
+| `#/keys` | **Gateway API Keys** — key CRUD, role picker, allowed-models selector, RPM/burst/quota inputs. |
+| `#/models` | **Models** — 3 tabs: **Models** (usage stats) \| **Custom** (custom models + aliases) \| **Combos** (group models under virtual alias). |
 
-Live gateway keys are **never** rendered into the HTML server-side.
+Live gateway keys are **never** rendered into the HTML server-side. Delete buttons
+use `data-*` attributes + event delegation (XSS-safe, no inline `onclick`).
 
 ---
 

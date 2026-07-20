@@ -34,9 +34,17 @@ const (
 )
 
 // GatewayKeyInfo holds metadata + usage for a gateway API key.
+//
+// mu protects every mutable field (Name, Role, AllowedModels, RPM, Burst,
+// TokenQuota, TokensUsed, Requests, Disabled). Key/KeyMasked/CreatedAt are
+// set at creation and immutable thereafter — reads of those don't require
+// the mutex. All writers (Manager.Update, Manager.IncrementTokens,
+// Manager.IncrementRequests) take this lock. Readers should call Snapshot()
+// to get a race-free value copy.
 type GatewayKeyInfo struct {
-	Key           string    `json:"key"`            // full key (only returned on create)
-	KeyMasked     string    `json:"key_masked"`     // gw-zUkr...DrrpE
+	mu            sync.RWMutex
+	Key           string    `json:"key"`            // full key (only returned on create); immutable
+	KeyMasked     string    `json:"key_masked"`     // gw-zUkr...DrrpE; immutable
 	Name          string    `json:"name"`           // human label
 	Role          KeyRole   `json:"role"`           // inference | admin
 	AllowedModels []string  `json:"allowed_models"` // model whitelist (empty = all models allowed)
@@ -45,13 +53,73 @@ type GatewayKeyInfo struct {
 	TokenQuota    int64     `json:"token_quota"`    // total token quota (0 = unlimited)
 	TokensUsed    int64     `json:"tokens_used"`    // tokens consumed
 	Requests      int64     `json:"requests"`       // total requests
+	CreatedAt     time.Time `json:"created_at"`     // immutable
+	Disabled      bool      `json:"disabled"`
+}
+
+// GatewayKeySnapshot is a race-free value copy of GatewayKeyInfo.
+// No embedded mutex, so copying / passing by value / returning by value is
+// safe (unlike GatewayKeyInfo which owns a sync.RWMutex).
+//
+// Every consumer that reads gateway-key metadata off the hot path should
+// use this type — Manager.Get / Manager.GetAll return snapshots.
+type GatewayKeySnapshot struct {
+	Key           string    `json:"key"`
+	KeyMasked     string    `json:"key_masked"`
+	Name          string    `json:"name"`
+	Role          KeyRole   `json:"role"`
+	AllowedModels []string  `json:"allowed_models"`
+	RPM           int       `json:"rpm"`
+	Burst         int       `json:"burst"`
+	TokenQuota    int64     `json:"token_quota"`
+	TokensUsed    int64     `json:"tokens_used"`
+	Requests      int64     `json:"requests"`
 	CreatedAt     time.Time `json:"created_at"`
 	Disabled      bool      `json:"disabled"`
 }
 
-// IsModelAllowed checks if a model is in the key's allowed_models whitelist.
-// Supports glob suffixes: "grok-*" matches "grok-4.5", "cb/*" matches "cb/gpt-5.5".
-// Empty AllowedModels = all models allowed (backward compat).
+// IsModelAllowed checks if the snapshot's allowed_models whitelist admits model.
+// See MatchModel for glob semantics.
+func (s GatewayKeySnapshot) IsModelAllowed(model string) bool {
+	if len(s.AllowedModels) == 0 {
+		return true
+	}
+	for _, pattern := range s.AllowedModels {
+		if MatchModel(pattern, model) {
+			return true
+		}
+	}
+	return false
+}
+
+// Snapshot returns a race-free value copy of the info.
+func (k *GatewayKeyInfo) Snapshot() GatewayKeySnapshot {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	var am []string
+	if k.AllowedModels != nil {
+		am = make([]string, len(k.AllowedModels))
+		copy(am, k.AllowedModels)
+	}
+	return GatewayKeySnapshot{
+		Key:           k.Key,
+		KeyMasked:     k.KeyMasked,
+		Name:          k.Name,
+		Role:          k.Role,
+		AllowedModels: am,
+		RPM:           k.RPM,
+		Burst:         k.Burst,
+		TokenQuota:    k.TokenQuota,
+		TokensUsed:    k.TokensUsed,
+		Requests:      k.Requests,
+		CreatedAt:     k.CreatedAt,
+		Disabled:      k.Disabled,
+	}
+}
+
+// IsModelAllowed on *GatewayKeyInfo takes RLock and defers to the snapshot logic.
+// Retained for callers that still hold a *GatewayKeyInfo (rare — should migrate
+// to Snapshot()).
 func (k *GatewayKeyInfo) IsModelAllowed(model string) bool {
 	if len(k.AllowedModels) == 0 {
 		return true // no whitelist = unrestricted
@@ -225,7 +293,7 @@ func NewManager(store *db.Store) *Manager {
 			}
 			slog.Info("AUTO-BOOTSTRAP: generated admin key (first boot)",
 				"module", "auth",
-				"key", bootstrapKey,
+				"key_masked", MaskKey(bootstrapKey),
 				"file", bootstrapFile,
 				"login_url", "http://localhost:"+port+"/login")
 		}
@@ -250,62 +318,105 @@ func NewManagerForTest(keys map[string]*GatewayKeyInfo) *Manager {
 // Valid checks if a key is authorized and not disabled.
 func (am *Manager) Valid(key string) bool {
 	am.mu.RLock()
-	defer am.mu.RUnlock()
+	info, ok := am.keys[key]
+	empty := len(am.keys) == 0
+	am.mu.RUnlock()
 	// Fail-closed: no keys = reject. Auth bypass only via GATEWAY_AUTH_DISABLE env
 	// (handled in AuthMiddleware, not here).
-	if len(am.keys) == 0 {
+	if empty || !ok {
 		return false
 	}
-	info, ok := am.keys[key]
-	return ok && !info.Disabled
+	info.mu.RLock()
+	disabled := info.Disabled
+	info.mu.RUnlock()
+	return !disabled
 }
 
-// Get returns the GatewayKeyInfo for a key, or nil.
-func (am *Manager) Get(key string) *GatewayKeyInfo {
+// Get returns a race-free snapshot of the GatewayKeyInfo for key.
+// ok=false means the key is not registered. The returned value is a
+// deep copy — mutating it does NOT affect the manager's state.
+func (am *Manager) Get(key string) (GatewayKeySnapshot, bool) {
 	am.mu.RLock()
-	defer am.mu.RUnlock()
-	return am.keys[key]
+	info, ok := am.keys[key]
+	am.mu.RUnlock()
+	if !ok {
+		return GatewayKeySnapshot{}, false
+	}
+	return info.Snapshot(), true
 }
 
 // LookupKey implements ratelimit.AuthLookup. Returns per-key rpm/burst if
 // the key is registered. ok=false means the key isn't in the pool.
 func (am *Manager) LookupKey(key string) (rpm, burst int, ok bool) {
 	am.mu.RLock()
-	defer am.mu.RUnlock()
 	info, exists := am.keys[key]
+	am.mu.RUnlock()
 	if !exists {
 		return 0, 0, false
 	}
-	return info.RPM, info.Burst, true
+	info.mu.RLock()
+	rpm = info.RPM
+	burst = info.Burst
+	info.mu.RUnlock()
+	return rpm, burst, true
 }
 
-// GetAll returns a slice copy of all keys.
-func (am *Manager) GetAll() []*GatewayKeyInfo {
+// GetAll returns a slice of race-free snapshots of every registered key.
+func (am *Manager) GetAll() []GatewayKeySnapshot {
 	am.mu.RLock()
-	defer am.mu.RUnlock()
-	result := make([]*GatewayKeyInfo, 0, len(am.keys))
+	infos := make([]*GatewayKeyInfo, 0, len(am.keys))
 	for _, info := range am.keys {
-		result = append(result, info)
+		infos = append(infos, info)
+	}
+	am.mu.RUnlock()
+	result := make([]GatewayKeySnapshot, 0, len(infos))
+	for _, info := range infos {
+		result = append(result, info.Snapshot())
 	}
 	return result
 }
 
+// CountAdmins returns the number of admin-role keys (P3-1: last-admin lockout guard).
+func (am *Manager) CountAdmins() int {
+	am.mu.RLock()
+	infos := make([]*GatewayKeyInfo, 0, len(am.keys))
+	for _, info := range am.keys {
+		infos = append(infos, info)
+	}
+	am.mu.RUnlock()
+	count := 0
+	for _, info := range infos {
+		info.mu.RLock()
+		if info.Role == RoleAdmin && !info.Disabled {
+			count++
+		}
+		info.mu.RUnlock()
+	}
+	return count
+}
+
 // Add creates a new inference-role key with metadata and persists to Redis.
-func (am *Manager) Add(key, name string, rpm, burst int, tokenQuota int64) *GatewayKeyInfo {
+func (am *Manager) Add(key, name string, rpm, burst int, tokenQuota int64) GatewayKeySnapshot {
 	return am.AddWithRole(key, name, RoleInference, nil, rpm, burst, tokenQuota)
 }
 
 // AddWithRole creates a key with an explicit role and persists to Redis.
-func (am *Manager) AddWithRole(key, name string, role KeyRole, allowedModels []string, rpm, burst int, tokenQuota int64) *GatewayKeyInfo {
+// Returns a snapshot of the newly created key.
+func (am *Manager) AddWithRole(key, name string, role KeyRole, allowedModels []string, rpm, burst int, tokenQuota int64) GatewayKeySnapshot {
 	if role == "" {
 		role = RoleInference
+	}
+	var am2 []string
+	if allowedModels != nil {
+		am2 = make([]string, len(allowedModels))
+		copy(am2, allowedModels)
 	}
 	info := &GatewayKeyInfo{
 		Key:           key,
 		KeyMasked:     MaskKey(key),
 		Name:          name,
 		Role:          role,
-		AllowedModels: allowedModels,
+		AllowedModels: am2,
 		RPM:           rpm,
 		Burst:         burst,
 		TokenQuota:    tokenQuota,
@@ -317,7 +428,7 @@ func (am *Manager) AddWithRole(key, name string, role KeyRole, allowedModels []s
 	if am.db != nil {
 		saveGatewayKey(am.db, info)
 	}
-	return info
+	return info.Snapshot()
 }
 
 // Remove deletes a key from memory + Redis.
@@ -332,12 +443,13 @@ func (am *Manager) Remove(key string) {
 
 // Update modifies key metadata in memory + Redis.
 func (am *Manager) Update(key, name string, role KeyRole, allowedModels []string, rpm, burst int, tokenQuota int64, disabled *bool) bool {
-	am.mu.Lock()
+	am.mu.RLock()
 	info, ok := am.keys[key]
+	am.mu.RUnlock()
 	if !ok {
-		am.mu.Unlock()
 		return false
 	}
+	info.mu.Lock()
 	if name != "" {
 		info.Name = name
 	}
@@ -345,7 +457,10 @@ func (am *Manager) Update(key, name string, role KeyRole, allowedModels []string
 		info.Role = role
 	}
 	if allowedModels != nil {
-		info.AllowedModels = allowedModels
+		// Own the slice so future mutations don't race with snapshots taken earlier.
+		cp := make([]string, len(allowedModels))
+		copy(cp, allowedModels)
+		info.AllowedModels = cp
 	}
 	if rpm >= 0 {
 		info.RPM = rpm
@@ -360,9 +475,10 @@ func (am *Manager) Update(key, name string, role KeyRole, allowedModels []string
 		info.Disabled = *disabled
 	}
 	info.KeyMasked = MaskKey(info.Key)
-	am.mu.Unlock()
+	dto := gatewayKeyDTOFromInfo(info)
+	info.mu.Unlock()
 	if am.db != nil {
-		saveGatewayKey(am.db, info)
+		am.db.SaveGatewayKey(dto)
 	}
 	return true
 }
@@ -370,12 +486,13 @@ func (am *Manager) Update(key, name string, role KeyRole, allowedModels []string
 // IncrementTokens adds to the token usage for a key (memory + Redis).
 // If quota is set and exceeded, auto-disables the key.
 func (am *Manager) IncrementTokens(key string, amount int64) {
-	am.mu.Lock()
+	am.mu.RLock()
 	info, ok := am.keys[key]
+	am.mu.RUnlock()
 	if !ok {
-		am.mu.Unlock()
 		return
 	}
+	info.mu.Lock()
 	info.TokensUsed += amount
 	info.Requests++
 	// Auto-disable if quota exceeded
@@ -387,26 +504,32 @@ func (am *Manager) IncrementTokens(key string, amount int64) {
 			"tokens_used", info.TokensUsed,
 			"token_quota", info.TokenQuota)
 	}
-	am.mu.Unlock()
+	disabled := info.Disabled
+	var dto db.GatewayKeyDTO
+	if disabled {
+		dto = gatewayKeyDTOFromInfo(info)
+	}
+	info.mu.Unlock()
 	if am.db != nil {
 		am.db.IncrementGatewayKeyTokens(key, amount)
 		am.db.IncrementGatewayKeyRequests(key)
-		if info.Disabled {
-			saveGatewayKey(am.db, info)
+		if disabled {
+			am.db.SaveGatewayKey(dto)
 		}
 	}
 }
 
 // IncrementRequests adds 1 to the request count for a key.
 func (am *Manager) IncrementRequests(key string) {
-	am.mu.Lock()
+	am.mu.RLock()
 	info, ok := am.keys[key]
+	am.mu.RUnlock()
 	if !ok {
-		am.mu.Unlock()
 		return
 	}
+	info.mu.Lock()
 	info.Requests++
-	am.mu.Unlock()
+	info.mu.Unlock()
 	if am.db != nil {
 		am.db.IncrementGatewayKeyRequests(key)
 	}
@@ -470,8 +593,8 @@ func AdminMiddleware(am *Manager) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		info := am.Get(fullKey.(string))
-		if info == nil {
+		info, ok := am.Get(fullKey.(string))
+		if !ok {
 			c.JSON(401, gin.H{"error": "invalid API key"})
 			c.Abort()
 			return
@@ -488,10 +611,14 @@ func AdminMiddleware(am *Manager) gin.HandlerFunc {
 // AuthMiddleware validates Bearer tokens (or session cookies) against the
 // key pool. Public paths bypass; unauthenticated browser requests to
 // text/html endpoints redirect to /login.
-func AuthMiddleware(am *Manager) gin.HandlerFunc {
+func AuthMiddleware(am *Manager, sessionLookup ...func(string) string) gin.HandlerFunc {
 	// Fail-closed by default: if no keys are loaded, reject all requests
 	// EXCEPT when GATEWAY_AUTH_DISABLE=1 is set explicitly (dev mode).
 	authDisabled := os.Getenv("GATEWAY_AUTH_DISABLE") == "1"
+	var sl func(string) string
+	if len(sessionLookup) > 0 {
+		sl = sessionLookup[0]
+	}
 	return func(c *gin.Context) {
 		// Skip auth for public endpoints
 		path := c.Request.URL.Path
@@ -523,12 +650,17 @@ func AuthMiddleware(am *Manager) gin.HandlerFunc {
 		if strings.HasPrefix(auth, "Bearer ") {
 			key = strings.TrimPrefix(auth, "Bearer ")
 		} else if ck, err := c.Cookie("foxrouters_session"); err == nil && ck != "" {
-			key = ck
+			// P3-3: cookie value is a session token, resolve to API key.
+			if sl != nil {
+				key = sl(ck)
+			} else {
+				key = ck // legacy: cookie was raw key (pre-P3-3)
+			}
 		}
 
 		if key == "" {
 			// For browser requests (Accept: text/html), redirect to login
-			if strings.Contains(c.GetHeader("Accept"), "text/html") && path != "/api/" {
+			if strings.Contains(c.GetHeader("Accept"), "text/html") && !strings.HasPrefix(path, "/api/") {
 				c.Redirect(302, "/login")
 				c.Abort()
 				return
@@ -540,7 +672,8 @@ func AuthMiddleware(am *Manager) gin.HandlerFunc {
 		if !am.Valid(key) {
 			// Invalid cookie session → clear it and redirect to login
 			if _, err := c.Cookie("foxrouters_session"); err == nil {
-				c.SetCookie("foxrouters_session", "", -1, "/", "", false, true)
+				cookieSecure := os.Getenv("COOKIE_SECURE") != "0"
+				c.SetCookie("foxrouters_session", "", -1, "/", "", cookieSecure, true)
 				if strings.Contains(c.GetHeader("Accept"), "text/html") {
 					c.Redirect(302, "/login")
 					c.Abort()
@@ -562,17 +695,19 @@ func AuthMiddleware(am *Manager) gin.HandlerFunc {
 // Persistence bridge — GatewayKeyInfo ↔ db.GatewayKeyDTO
 // ---------------------------------------------------------------------------
 
-// saveGatewayKey persists a GatewayKeyInfo. The caller should own the read
-// lock or work on a private copy — we don't grab am.mu here.
-func saveGatewayKey(s *db.Store, info *GatewayKeyInfo) {
-	if s == nil || info == nil {
-		return
+// gatewayKeyDTOFromInfo builds a DTO from info. Caller MUST hold info.mu
+// (either read or write lock) — this reads all fields.
+func gatewayKeyDTOFromInfo(info *GatewayKeyInfo) db.GatewayKeyDTO {
+	var am []string
+	if info.AllowedModels != nil {
+		am = make([]string, len(info.AllowedModels))
+		copy(am, info.AllowedModels)
 	}
-	s.SaveGatewayKey(db.GatewayKeyDTO{
+	return db.GatewayKeyDTO{
 		Key:           info.Key,
 		Name:          info.Name,
 		Role:          string(info.Role),
-		AllowedModels: info.AllowedModels,
+		AllowedModels: am,
 		RPM:           info.RPM,
 		Burst:         info.Burst,
 		TokenQuota:    info.TokenQuota,
@@ -580,7 +715,19 @@ func saveGatewayKey(s *db.Store, info *GatewayKeyInfo) {
 		Requests:      info.Requests,
 		CreatedAt:     info.CreatedAt,
 		Disabled:      info.Disabled,
-	})
+	}
+}
+
+// saveGatewayKey persists a GatewayKeyInfo. Takes info.mu.RLock() internally
+// to build a consistent DTO — callers must NOT already hold info.mu.
+func saveGatewayKey(s *db.Store, info *GatewayKeyInfo) {
+	if s == nil || info == nil {
+		return
+	}
+	info.mu.RLock()
+	dto := gatewayKeyDTOFromInfo(info)
+	info.mu.RUnlock()
+	s.SaveGatewayKey(dto)
 }
 
 // loadGatewayKeys returns []*GatewayKeyInfo rehydrated from Redis DTOs.
@@ -611,7 +758,11 @@ func loadGatewayKeys(s *db.Store) ([]*GatewayKeyInfo, error) {
 			Disabled:      d.Disabled,
 		}
 		if info.Role == "" {
-			info.Role = RoleAdmin
+			// Least-privilege default: inference only. Only bootstrap keys
+			// (explicitly set to RoleAdmin at creation) should be admin.
+			// This prevents latent privilege escalation if a persistence bug
+			// ever clears the role field (P3 #8 security fix).
+			info.Role = RoleInference
 		}
 		out = append(out, info)
 	}

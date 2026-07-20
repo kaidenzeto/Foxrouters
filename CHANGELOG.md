@@ -2,9 +2,220 @@
 
 **Service:** `foxrouters.service` · port **20130** · binary `foxrouters`  
 **Repo:** `/root/nexus-workspace/foxrouters/`  
-**Live version:** `const Version` in `main.go` (currently **5.11.2**)
+**Live version:** `const Version` in `main.go` (currently **v1.5.0**)
 
 Policy: **test (`go test -race`) before build/restart**. Secrets only via `.gateway.env` (gitignored).
+
+---
+
+## v1.5.0 — Proxy Pool Manager + Security Audit Fixes (2026-07-20)
+
+### Added
+
+| Feature | Description |
+|---------|-------------|
+| **Proxy pool manager** | Dashboard-managed HTTP/SOCKS5 proxy pool with round-robin rotation. All upstream calls (Grok chat, CodeBuddy chat, token refresh, health checks) route through enabled proxies. Redis-backed CRUD, auto-disable after 5 consecutive failures, proxy test endpoint. |
+| **Per-upstream proxy scoping** | Each proxy carries an `upstreams` list (`all` / `grok` / `codebuddy`). `ProxyPool.Next(upstream)` filters by scope — assign a proxy to Grok only, CodeBuddy only, or both. Backward compatible (old entries default `["all"]`). |
+| **Dashboard Proxies page** | New `#/proxies` nav route — stats cards, proxy pool table with upstream badges, add/edit modal with upstream checkboxes, test/toggle/delete actions. |
+
+### Fixed (security audit — 17 bugs across 3 tracks)
+
+| Track | Fixes |
+|-------|-------|
+| **P0 data races (3)** | C1: `saveGrokAccount` reads fields after `Unlock()` (7 call sites) → `toDTO()` snapshot under RLock. C2: `saveCBKey` reads fields after `Unlock()` (5 sites) → capture locals inside lock. C3: `Manager.Get()` returns `*GatewayKeyInfo` pointer → changed to value-type `GatewayKeySnapshot` + per-key RWMutex. C5: `IncrementTokens` reads `info.Disabled` after unlock → capture inside lock. |
+| **P1 concurrency (5)** | C6: SSE stream no client-cancel check → `ctx.Err()` + writer error check. C8: 401 double-fault after refresh → permanent disable. C9: `bufferedWriter` header copy clobbers middleware headers → `Add()` merge. C10: combo fallback no ctx propagation → `NewRequestWithContext`. |
+| **P1+P2 dashboard+logs (7)** | D1: stored XSS via custom model id in `onclick` → `data-*` + delegated handler. D2: login redirect loop for inference-role users → admin-only gate. D3: dead Test button in cookie mode → conditional Bearer header. D7: `apiFetch` returns undefined on 401 → throw sentinel. D8: uncleared poll intervals → `_stopped` guard. S1: full API keys in Redis error logs → `maskRedisKey()`. S2: bootstrap admin key in logs → `MaskKey()`. |
+| **Dashboard fixes** | `loadProxies` ReferenceError (typeof guard), scroll-to-top on page change, page-proxies rendered outside `div.content` (broken div nesting), proxies page UI (inline form → modal). |
+
+### Security audit summary
+
+| Round | Scope | Findings | Fixed |
+|-------|-------|----------|-------|
+| v1.4.6–v1.4.8 | Auth, session, CSRF, XSS, limiter | 12 items | 12/12 ✅ |
+| v1.5.0 (3-track) | Data races, concurrency, dashboard, logs | 17 bugs (3 P0 + 6 P1 + 8 P2) | 17/17 ✅ |
+| v1.5.0 (proxy pool) | SSRF, credential leak, injection, authz, races | 3 P3 defense-in-depth | 0 (accepted risk) |
+
+### Files changed (v1.5.0)
+
+**New:** `internal/proxy/pool.go`, `internal/handlers/proxies.go`, `proxy_pool_test.go`  
+**Modified:** `internal/db/db.go`, `internal/upstream/{upstream,grok,codebuddy,health}.go`, `internal/auth/auth.go`, `internal/handlers/handlers.go`, `internal/proxy/{buffered_writer,proxy}.go`, `main.go`, `dashboard.html`, `go.mod`
+
+---
+
+## v1.4.8 — /health session cookie fix (2026-07-19)
+
+### What changed
+
+| Area | Before | After |
+|------|--------|-------|
+| `/health` endpoint | cookie = raw API key (pre-P3-3) → `am.Get(ck)` worked | cookie = session token (P3-3) → `am.Get(ck)` returned nil → minimal response |
+| Dashboard stats | "CB KEYS: undefined active", circuit cards "—" | proper counts (976 keys, 502 grok accounts, upstreams populated) |
+| JS console | `Cannot read properties of undefined (reading 'grok')` | 0 errors |
+
+### Fix
+
+`HandleHealth` now accepts a `sessions` parameter and resolves `cookie → session token → API key` via `sessions.Lookup()` before `am.Get(key)`.
+
+### Files
+
+- `internal/handlers/handlers.go` — `HandleHealth` +1 param
+- `handlers_adapter.go` — `handleHealth`/`handleLogin`/`handleLogout` → function wrappers (var aliases don't match new signatures)
+- `main.go` — pass `sessions` to `handleHealth`
+
+---
+
+## v1.4.7 — Security re-audit fixes (2026-07-19)
+
+7 bugs fixed from second security audit (commit `a49df94`):
+
+| # | Bug | Fix |
+|---|-----|-----|
+| P2-1 | Login rate-limit bypass via `X-Forwarded-For` spoofing | `r.SetTrustedProxies(nil)` — don't trust XFF |
+| P2-2 | CSRF on admin mutations (cookie session + no Origin check) | New `csrf_guard.go` — Origin/Referer check on cookie-authed POST/PUT/DELETE |
+| P3-1 | Admin can delete last admin key → self-DoS | `CountAdmins()` + 409 refuse if last admin |
+| P3-2 | Unbounded combo `models` array → Redis DoS | Cap `len(c.Models) <= 32` |
+| P3-3 | Session fixation (cookie = raw API key) | New `internal/auth/session_store.go` — 256-bit random session tokens, 7-day TTL |
+| P4-1 | `loginLimiter.cleanup()` trimmed minuteWindow by hourCutoff | 1-char fix: `hourCutoff` → `minCutoff` |
+| P4-2 | Legacy inline `onclick` on pagination buttons (10 occurrences) | Migrated to `data-page`/`data-action` + event delegation |
+
+### New files
+
+- `csrf_guard.go` — Origin/Referer check middleware
+- `internal/auth/session_store.go` — `SessionStore` (in-memory token → key map)
+
+### Compliance
+
+12/12 security checklist items ✅ (was 9/12 after v1.4.6)
+
+---
+
+## v1.4.6 — Security audit fixes (2026-07-19)
+
+9 bugs fixed from first security audit (commit `3f0c82e`):
+
+| # | Bug | Fix |
+|---|-----|-----|
+| P1-1 | Stored XSS in dashboard (6 `onclick` handlers) | `data-*` attributes + global event delegation |
+| P2-2 | 26 Go stdlib CVEs (Go 1.25.0 stale) | `go.mod` → `go 1.25.12` (auto-upgrade) |
+| P2-3 | Cookie missing `Secure` flag | `Secure: true` default + `COOKIE_SECURE=0` dev override |
+| P3-4 | `key_full` leak in `/accounts` + `/cb-stats` | Removed; `ResolveKey(masked)` server-side on delete |
+| P3-5 | No input validation (id/alias/combo) | `validateName()` regex `^[A-Za-z0-9._/\-]{1,64}$` |
+| P3-6 | No rate limit on `/login` | `login_limiter.go` — 5/min + 20/hour per IP |
+| P3-7 | Upstream `requestId` leak in errors | Generic error message only |
+| P3-8 | Empty role → admin fallback | Default → `RoleInference` (least privilege) |
+| P4-9 | Dead path check (`path != "/api/"`) | `!strings.HasPrefix(path, "/api/")` |
+
+### New files
+
+- `internal/proxy/validate.go` — `validateName()` helper
+- `login_limiter.go` — IP-based rate limiter for `/login`
+
+### Verification
+
+- `govulncheck ./...` → 0 vulnerabilities (26 CVEs gone)
+- `go test -race` → 62/62 PASS
+
+---
+
+## v1.4.5 — Custom Models tab + Combos selector (2026-07-19)
+
+### UI restructure
+
+| Area | Before | After |
+|------|--------|-------|
+| Nav bar | 5 items (Dashboard, Accounts, Keys, Models, Custom) | 4 items (Dashboard, Accounts, Keys, Models) |
+| Custom Models | Separate page (`#/custom`) | Tab inside page Models |
+| Combos form | Textarea (manual model input) | Checkbox selector (mirip API keys) |
+| Models page | Single view | 3 tabs: **Models** \| **Custom** \| **Combos** |
+
+### Combos model selector
+
+- `loadComboModelSelector()` — fetch `/v1/models`, cache, render grouped checkboxes
+- `toggleAllComboModels(check)` / `toggleComboGroup(prefix)` — bulk select
+- `getSelectedComboModels()` — return checked values
+- `updateComboSelectedCount()` — real-time counter
+
+---
+
+## v1.4.3 — Combos moved to tab in Models page (2026-07-19)
+
+- Removed nav item "Combos" + route `#/combos` + `page-combos`
+- Added tab selector: `[Models] [Combos]` at top of page-models
+- Combo content moved to `#mtab-pane-combos` (default hidden)
+- `switchMTab('models'|'combos')` function for tab switching
+- `loadCombos()` auto-triggered on tab switch
+
+---
+
+## v1.4.2 — CB key masked fix in /cb-stats (2026-07-19)
+
+**Root cause:** Fix sebelumnya (`36b5602`) cuma `/accounts` yang dapat `key_full`, padahal dashboard `refresh()` pakai `/cb-stats` buat render CB table → key masih masked → delete 404.
+
+**Fix:** Tambah `key_full` ke `/cb-stats` response juga (main.go inline handler). *(Note: `key_full` removed again in v1.4.6 in favor of server-side `ResolveKey(masked)`.)*
+
+---
+
+## v1.4.1 — CB key delete 404 fix (2026-07-19)
+
+**Bug:** CB key delete return 404 karena dashboard pass masked key (`ck_abcde...wxyz`) ke DELETE endpoint, tapi backend expect full key.
+
+**Fix:** Backend return `key_full` field di `/accounts` response (admin-only via `adminAuth`). Dashboard pakai `k.key_full || k.key` buat delete (backward compat). *(Note: `key_full` removed in v1.4.6; delete now resolves masked → full server-side.)*
+
+---
+
+## v1.4.0 — Combos (fallback + round-robin strategies) (2026-07-19)
+
+### What changed
+
+| Area | Before | After |
+|------|--------|-------|
+| Multi-model routing | One model per request | + **combos**: `combo/<name>` groups N models under one virtual alias |
+| Reliability | Retry within a single upstream | + **fallback strategy**: try `models[0]`, on 5xx buffer response + retry `models[1]`, `models[2]`, … up to list end |
+| Load-spreading | Manual per-request model choice | + **round_robin strategy**: atomic `INCR combo:counter:<name>` rotates models across requests (cluster-safe) |
+| Model catalog | Hardcoded + custom models | + combos appear in `/v1/models` as `combo/<name>` with `owned_by: foxrouters` |
+| Dashboard | 5 pages | + **Combos** page (`#/combos`, admin) — create form + table with delete |
+
+### New endpoints (admin-only, Bearer auth)
+
+- `GET  /api/combos` — list every combo
+- `POST /api/combos` — `{name, strategy, models[], description?}` (strategy: `fallback` | `round_robin`)
+- `GET  /api/combos/*name` — fetch one combo
+- `DELETE /api/combos/*name` — remove combo + its round-robin counter
+
+### Example
+
+```bash
+# Create a Fallback combo (GPT-5.5 → Claude → Grok-4.5)
+curl -X POST http://127.0.0.1:20130/api/combos \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{"name":"smart-fallback","strategy":"fallback",
+       "models":["cb/gpt-5.5","cb/claude-sonnet-4.6","grok-4.5"],
+       "description":"GPT then Claude then Grok"}'
+
+# Call it — client sees the concrete backend response, retries are transparent
+curl -X POST http://127.0.0.1:20130/v1/chat/completions \
+  -H "Authorization: Bearer $CLIENT_KEY" -H "content-type: application/json" \
+  -d '{"model":"combo/smart-fallback","messages":[{"role":"user","content":"hi"}]}'
+```
+
+### Redis schema
+
+- `combos` HASH — `field=<name>`, `value=Combo JSON`
+- `combo:counter:<name>` STRING — atomic INCR for round-robin (auto-deleted on combo delete)
+
+### Implementation notes
+
+- Fallback retry is non-streaming-only: streaming requests use `models[0]` (once bytes hit the wire we can't un-send). SSE clients keep the head-of-list model without retry.
+- 4xx responses aren't retried (client error, not upstream). Only 5xx walks the chain.
+- Resolution order: custom-alias → combo → grok-alias → default prefix routing.
+- Combos of aliases work: the retry loop re-runs `CustomRegistry.Resolve` on each candidate so alias-of-model in a combo still resolves correctly.
+
+### Files
+
+- New: `internal/proxy/combo.go`, `internal/proxy/buffered_writer.go`, `internal/handlers/combos.go`, `combo_test.go`
+- Modified: `internal/db/db.go` (Combo type + Load/Save/Delete/IncrCounter), `internal/proxy/proxy.go` (combo resolution + fallback retry loop), `main.go` (registry init + 4 routes), adapters, `dashboard.html` (nav + page + JS)
+
+**Tests:** 62 total (52 pre-existing + 10 new). `go vet ./...` clean, `go test -count=1 -race` green.
 
 ---
 

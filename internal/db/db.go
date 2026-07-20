@@ -42,10 +42,34 @@ const (
 	// single well-known key — field = id, value = JSON config or target.
 	RK_CUSTOM_MODELS  = "custom_models"  // HASH field=model_id value=CustomModel JSON
 	RK_CUSTOM_ALIASES = "custom_aliases" // HASH field=alias      value=target model_id
+	RK_COMBOS         = "combos"         // HASH field=combo_name value=Combo JSON (v1.4.0)
+	RK_COMBO_COUNTER  = "combo:counter:" // STRING prefix, atomic INCR for round-robin
+
+	// Proxy pool (v1.5.0) — dashboard-managed HTTP/SOCKS5 proxies for upstream calls.
+	RK_PROXY         = "fr:proxy:"         // HASH prefix: fr:proxy:<id> (fields: protocol, host, port, …)
+	RK_PROXY_ENABLED = "fr:proxy:enabled"  // SET of enabled proxy IDs (fast round-robin selection)
+	RK_PROXY_RR      = "fr:proxy:rr"       // STRING atomic INCR for round-robin index
 
 	LOG_BUFFER_SIZE    = 10000
 	LOG_FLUSH_INTERVAL = 2 * time.Second
 )
+
+// maskRedisKey masks the credential body of a Redis key so full API keys never
+// leak into slog output. Given e.g. "cb:key:ck_abcd1234...wxyz", returns
+// "cb:key:ck_abcd1...wxyz". Preserves the prefix so operators can still tell
+// which pool the failure came from.
+func maskRedisKey(rk string) string {
+	// find the last ':' — everything after it is the credential body
+	i := strings.LastIndex(rk, ":")
+	if i < 0 || i == len(rk)-1 {
+		return rk
+	}
+	prefix, body := rk[:i+1], rk[i+1:]
+	if len(body) > 12 {
+		return prefix + body[:8] + "..." + body[len(body)-4:]
+	}
+	return prefix + "***"
+}
 
 // envOr returns os.Getenv(key) if set, otherwise def.
 func envOr(key, def string) string {
@@ -351,7 +375,7 @@ func (s *Store) DeleteCBKey(key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	if err := s.rdb.Del(ctx, RK_CB_KEY+key).Err(); err != nil {
-		slog.Warn("DEL cb key failed", "module", "db-redis", "key", key, "error", err)
+		slog.Warn("DEL cb key failed", "module", "db-redis", "key", maskRedisKey(RK_CB_KEY+key), "error", err)
 	}
 }
 
@@ -363,7 +387,7 @@ func (s *Store) DeleteGatewayKey(key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	if err := s.rdb.Del(ctx, RK_GATEWAY_KEY+key).Err(); err != nil {
-		slog.Warn("DEL gateway key failed", "module", "db-redis", "key", key, "error", err)
+		slog.Warn("DEL gateway key failed", "module", "db-redis", "key", maskRedisKey(RK_GATEWAY_KEY+key), "error", err)
 	}
 }
 
@@ -394,7 +418,7 @@ func (s *Store) SaveGrokAccount(dto GrokAccountDTO) {
 	}
 	key := RK_GROK_ACCOUNT + dto.Email
 	if err := s.rdb.HSet(ctx, key, data).Err(); err != nil {
-		slog.Warn("HSet failed", "module", "db-redis", "key", key, "error", err)
+		slog.Warn("HSet failed", "module", "db-redis", "key", maskRedisKey(key), "error", err)
 	}
 }
 
@@ -444,7 +468,7 @@ func (s *Store) SaveCBKey(dto CBKeyDTO) {
 	}
 	rk := RK_CB_KEY + dto.Key
 	if err := s.rdb.HSet(ctx, rk, data).Err(); err != nil {
-		slog.Warn("HSet failed", "module", "db-redis", "key", rk, "error", err)
+		slog.Warn("HSet failed", "module", "db-redis", "key", maskRedisKey(rk), "error", err)
 	}
 }
 
@@ -495,7 +519,7 @@ func (s *Store) SaveGatewayKey(dto GatewayKeyDTO) {
 	}
 	rk := RK_GATEWAY_KEY + dto.Key
 	if err := s.rdb.HSet(ctx, rk, data).Err(); err != nil {
-		slog.Warn("HSet failed", "module", "db-redis", "key", rk, "error", err)
+		slog.Warn("HSet failed", "module", "db-redis", "key", maskRedisKey(rk), "error", err)
 	}
 }
 
@@ -534,7 +558,7 @@ func (s *Store) IncrementGatewayKeyTokens(key string, amount int64) {
 	defer cancel()
 	rk := RK_GATEWAY_KEY + key
 	if err := s.rdb.HIncrBy(ctx, rk, "tokens_used", amount).Err(); err != nil {
-		slog.Warn("HINCRBY tokens_used failed", "module", "db-redis", "key", rk, "error", err)
+		slog.Warn("HINCRBY tokens_used failed", "module", "db-redis", "key", maskRedisKey(rk), "error", err)
 	}
 }
 
@@ -547,7 +571,7 @@ func (s *Store) IncrementGatewayKeyRequests(key string) {
 	defer cancel()
 	rk := RK_GATEWAY_KEY + key
 	if err := s.rdb.HIncrBy(ctx, rk, "requests", 1).Err(); err != nil {
-		slog.Warn("HINCRBY requests failed", "module", "db-redis", "key", rk, "error", err)
+		slog.Warn("HINCRBY requests failed", "module", "db-redis", "key", maskRedisKey(rk), "error", err)
 	}
 }
 
@@ -1155,6 +1179,296 @@ func (s *Store) DeleteCustomAlias(alias string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	return s.rdb.HDel(ctx, RK_CUSTOM_ALIASES, alias).Err()
+}
+
+// ============================================================================
+// REDIS — Combos (v1.4.0)
+// ============================================================================
+
+// Combo groups multiple models under a single logical name with a routing
+// strategy applied per request. Callers reference the combo as
+// "combo/<name>" — see ComboRegistry.Resolve.
+//
+//   Strategy "fallback"    — try models in order; on upstream failure the
+//                            proxy falls through to the next entry (see the
+//                            fallback retry loop in proxy.ProxyRequest).
+//   Strategy "round_robin" — atomic INCR of combo:counter:<name> selects the
+//                            next model modulo len(Models) per request.
+type Combo struct {
+	Name        string   `json:"name"`
+	Strategy    string   `json:"strategy"`    // "fallback" | "round_robin"
+	Models      []string `json:"models"`      // ordered list of model IDs
+	Description string   `json:"description"` // optional
+}
+
+// LoadCombos returns every persisted combo keyed by name.
+func (s *Store) LoadCombos() (map[string]Combo, error) {
+	out := map[string]Combo{}
+	if s == nil || s.rdb == nil {
+		return out, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	vals, err := s.rdb.HGetAll(ctx, RK_COMBOS).Result()
+	if err != nil {
+		return out, err
+	}
+	for name, raw := range vals {
+		var cb Combo
+		if err := json.Unmarshal([]byte(raw), &cb); err != nil {
+			slog.Warn("bad combos entry", "module", "db-redis", "name", name, "error", err)
+			continue
+		}
+		// Backfill Name if missing (older writes / migrations).
+		if cb.Name == "" {
+			cb.Name = name
+		}
+		out[name] = cb
+	}
+	return out, nil
+}
+
+// SaveCombo stores one combo (upsert).
+func (s *Store) SaveCombo(c Combo) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	if c.Name == "" {
+		return fmt.Errorf("combo name required")
+	}
+	blob, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return s.rdb.HSet(ctx, RK_COMBOS, c.Name, string(blob)).Err()
+}
+
+// DeleteCombo removes one combo entry and its round-robin counter.
+func (s *Store) DeleteCombo(name string) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// Best-effort delete both keys.
+	if err := s.rdb.HDel(ctx, RK_COMBOS, name).Err(); err != nil {
+		return err
+	}
+	_ = s.rdb.Del(ctx, RK_COMBO_COUNTER+name).Err()
+	return nil
+}
+
+// IncrComboCounter atomically increments the round-robin counter for the
+// given combo and returns the new value. The caller applies modulo over the
+// combo's model list length.
+func (s *Store) IncrComboCounter(name string) (int64, error) {
+	if s == nil || s.rdb == nil {
+		return 0, fmt.Errorf("redis not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return s.rdb.Incr(ctx, RK_COMBO_COUNTER+name).Result()
+}
+
+// ============================================================================
+// REDIS — Proxy pool (v1.5.0)
+// ============================================================================
+
+// ProxyEntryDTO is the persisted shape of one proxy pool entry.
+// Passwords are stored as-is in Redis (single-tenant admin surface); API
+// responses mask them via the pool layer.
+//
+// Upstreams scopes the proxy to specific upstream families ("all", "grok",
+// "codebuddy"). Stored as a JSON array string in the HASH. Nil/empty means
+// legacy pre-scoping entry; the pool layer treats that as ["all"].
+type ProxyEntryDTO struct {
+	ID         string
+	Protocol   string // "http" | "socks5"
+	Host       string
+	Port       int
+	Username   string
+	Password   string
+	Enabled    bool
+	Label      string
+	Upstreams  []string
+	CreatedAt  time.Time
+	LastUsedAt time.Time
+	FailCount  int
+}
+
+// SaveProxy upserts a proxy entry into Redis. Enabled/disabled membership
+// in the enabled-set is kept in sync so callers only need one call.
+func (s *Store) SaveProxy(dto ProxyEntryDTO) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	if dto.ID == "" {
+		return fmt.Errorf("proxy id required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// Upstreams as JSON array string. Empty slice serialises to "[]" so we
+	// can tell "explicitly no scope (illegal, but we tolerate)" from
+	// "field missing (legacy)". LoadProxies falls back to nil on parse err.
+	upstreamsJSON := "[]"
+	if len(dto.Upstreams) > 0 {
+		if b, err := json.Marshal(dto.Upstreams); err == nil {
+			upstreamsJSON = string(b)
+		}
+	}
+	data := map[string]interface{}{
+		"id":           dto.ID,
+		"protocol":     dto.Protocol,
+		"host":         dto.Host,
+		"port":         dto.Port,
+		"username":     dto.Username,
+		"password":     dto.Password,
+		"enabled":      dto.Enabled,
+		"label":        dto.Label,
+		"upstreams":    upstreamsJSON,
+		"created_at":   dto.CreatedAt.Unix(),
+		"last_used_at": dto.LastUsedAt.Unix(),
+		"fail_count":   dto.FailCount,
+	}
+	rk := RK_PROXY + dto.ID
+	if err := s.rdb.HSet(ctx, rk, data).Err(); err != nil {
+		return err
+	}
+	if dto.Enabled {
+		if err := s.rdb.SAdd(ctx, RK_PROXY_ENABLED, dto.ID).Err(); err != nil {
+			slog.Warn("SADD proxy enabled failed", "module", "db-redis", "id", dto.ID, "error", err)
+		}
+	} else {
+		if err := s.rdb.SRem(ctx, RK_PROXY_ENABLED, dto.ID).Err(); err != nil {
+			slog.Warn("SREM proxy enabled failed", "module", "db-redis", "id", dto.ID, "error", err)
+		}
+	}
+	return nil
+}
+
+// UpdateProxyLastUsed touches the last_used_at field on a proxy hash.
+// Best-effort — failures are logged but don't propagate.
+func (s *Store) UpdateProxyLastUsed(id string, ts time.Time) {
+	if s == nil || s.rdb == nil || id == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := s.rdb.HSet(ctx, RK_PROXY+id, "last_used_at", ts.Unix()).Err(); err != nil {
+		slog.Debug("HSet proxy last_used_at failed", "module", "db-redis", "id", id, "error", err)
+	}
+}
+
+// UpdateProxyFailCount sets fail_count on a proxy hash.
+func (s *Store) UpdateProxyFailCount(id string, count int) {
+	if s == nil || s.rdb == nil || id == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := s.rdb.HSet(ctx, RK_PROXY+id, "fail_count", count).Err(); err != nil {
+		slog.Debug("HSet proxy fail_count failed", "module", "db-redis", "id", id, "error", err)
+	}
+}
+
+// DeleteProxy removes a proxy hash + its membership in the enabled set.
+func (s *Store) DeleteProxy(id string) error {
+	if s == nil || s.rdb == nil {
+		return fmt.Errorf("redis not ready")
+	}
+	if id == "" {
+		return fmt.Errorf("id required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := s.rdb.Del(ctx, RK_PROXY+id).Err(); err != nil {
+		return err
+	}
+	_ = s.rdb.SRem(ctx, RK_PROXY_ENABLED, id).Err()
+	return nil
+}
+
+// LoadProxies scans every fr:proxy:<id> hash and returns the parsed DTOs.
+// The enabled set is authoritative for the Enabled flag — a stale HASH
+// enabled field never overrides membership in RK_PROXY_ENABLED.
+func (s *Store) LoadProxies() ([]ProxyEntryDTO, error) {
+	if s == nil || s.rdb == nil {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// SMEMBERS enabled set once so we can override the stored enabled bit.
+	enabledMembers, _ := s.rdb.SMembers(ctx, RK_PROXY_ENABLED).Result()
+	enabledSet := make(map[string]struct{}, len(enabledMembers))
+	for _, id := range enabledMembers {
+		enabledSet[id] = struct{}{}
+	}
+
+	pattern := RK_PROXY + "*"
+	iter := s.rdb.Scan(ctx, 0, pattern, 100).Iterator()
+	out := []ProxyEntryDTO{}
+	for iter.Next(ctx) {
+		rk := iter.Val()
+		// Skip the enabled-set key — same prefix, but not a HASH.
+		if rk == RK_PROXY_ENABLED || rk == RK_PROXY_RR {
+			continue
+		}
+		id := strings.TrimPrefix(rk, RK_PROXY)
+		vals, err := s.rdb.HGetAll(ctx, rk).Result()
+		if err != nil || len(vals) == 0 {
+			continue
+		}
+		dto := ProxyEntryDTO{
+			ID:       id,
+			Protocol: vals["protocol"],
+			Host:     vals["host"],
+			Username: vals["username"],
+			Password: vals["password"],
+			Label:    vals["label"],
+		}
+		// Upstreams: parse JSON array string. Missing field or parse
+		// failure leaves it nil — the pool layer defaults nil to ["all"]
+		// for backward compatibility with pre-scoping entries.
+		if raw, ok := vals["upstreams"]; ok && raw != "" && raw != "null" {
+			var us []string
+			if err := json.Unmarshal([]byte(raw), &us); err == nil {
+				dto.Upstreams = us
+			}
+		}
+		if v, err := strconv.Atoi(vals["port"]); err == nil {
+			dto.Port = v
+		}
+		if v, err := strconv.Atoi(vals["fail_count"]); err == nil {
+			dto.FailCount = v
+		}
+		if v, err := strconv.ParseInt(vals["created_at"], 10, 64); err == nil && v > 0 {
+			dto.CreatedAt = time.Unix(v, 0)
+		}
+		if v, err := strconv.ParseInt(vals["last_used_at"], 10, 64); err == nil && v > 0 {
+			dto.LastUsedAt = time.Unix(v, 0)
+		}
+		_, dto.Enabled = enabledSet[id]
+		out = append(out, dto)
+	}
+	if err := iter.Err(); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// IncrProxyRR atomically increments the shared round-robin counter and
+// returns the new value. Callers modulo the count of enabled proxies to
+// pick an index.
+func (s *Store) IncrProxyRR() (int64, error) {
+	if s == nil || s.rdb == nil {
+		return 0, fmt.Errorf("redis not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	return s.rdb.Incr(ctx, RK_PROXY_RR).Result()
 }
 
 // Close gracefully shuts down DB connections.

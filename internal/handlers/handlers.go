@@ -60,7 +60,7 @@ func HandleHealthMinimal() gin.HandlerFunc {
 }
 
 // HandleHealth reports overall status + (when authed) per-upstream telemetry.
-func HandleHealth(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManager, hc *upstream.HealthChecker, am *auth.Manager) gin.HandlerFunc {
+func HandleHealth(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManager, hc *upstream.HealthChecker, am *auth.Manager, sessions *auth.SessionStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		grokStats := hc.Grok.Stats()
 		cbStats := hc.CB.Stats()
@@ -81,14 +81,21 @@ func HandleHealth(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 		if os.Getenv("GATEWAY_AUTH_DISABLE") == "1" {
 			authed = true
 		} else if a := c.GetHeader("Authorization"); strings.HasPrefix(a, "Bearer ") {
-			if info := am.Get(a[7:]); info != nil {
+			if _, ok := am.Get(a[7:]); ok {
 				authed = true
-				_ = info
 			}
 		} else if ck, err := c.Cookie("foxrouters_session"); err == nil && ck != "" {
-			if info := am.Get(ck); info != nil {
-				authed = true
-				_ = info
+			// P3-3: cookie is now a session token, resolve to API key.
+			var key string
+			if sessions != nil {
+				key = sessions.Lookup(ck)
+			} else {
+				key = ck // legacy fallback (pre-P3-3)
+			}
+			if key != "" {
+				if _, ok := am.Get(key); ok {
+					authed = true
+				}
 			}
 		}
 		if !authed {
@@ -544,6 +551,13 @@ func HandleDeleteKey(am *auth.Manager) gin.HandlerFunc {
 			c.JSON(404, gin.H{"error": "key not found"})
 			return
 		}
+		// P3-1: prevent last-admin lockout (self-DoS).
+		// Refuse to delete if this key is admin AND it's the only admin left.
+		info, ok := am.Get(fullKey)
+		if ok && info.Role == auth.RoleAdmin && am.CountAdmins() <= 1 {
+			c.JSON(409, gin.H{"error": "cannot delete the last admin key — create another admin key first"})
+			return
+		}
 		am.Remove(fullKey)
 		slog.Info("deleted key", "module", "auth", "key", auth.MaskKey(fullKey))
 		c.JSON(200, gin.H{"deleted": auth.MaskKey(fullKey)})
@@ -611,7 +625,7 @@ func HandleUpdateKey(am *auth.Manager) gin.HandlerFunc {
 			c.JSON(404, gin.H{"error": "key not found"})
 			return
 		}
-		info := am.Get(fullKey)
+		info, _ := am.Get(fullKey)
 		slog.Info("updated key", "module", "auth", "key", auth.MaskKey(fullKey))
 		c.JSON(200, gin.H{
 			"key_masked":     auth.MaskKey(info.Key),
@@ -638,7 +652,7 @@ func HandleKeyUsage(am *auth.Manager) gin.HandlerFunc {
 			c.JSON(404, gin.H{"error": "key not found"})
 			return
 		}
-		info := am.Get(fullKey)
+		info, _ := am.Get(fullKey)
 		c.JSON(200, gin.H{
 			"key_masked":     auth.MaskKey(info.Key),
 			"name":           info.Name,
@@ -681,8 +695,9 @@ func HandleDashboard() gin.HandlerFunc {
 }
 
 // HandleLogin serves the login page (GET) and processes login (POST).
-// On successful auth, sets an HttpOnly cookie with the gateway key and redirects to /dashboard.
-func HandleLogin(am *auth.Manager) gin.HandlerFunc {
+// On successful auth, sets an HttpOnly cookie with a random session token
+// (NOT the raw API key — P3-3 session fixation fix) and redirects to /dashboard.
+func HandleLogin(am *auth.Manager, sessions *auth.SessionStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Method == "GET" {
 			c.Data(200, "text/html; charset=utf-8", []byte(loginPageHTML))
@@ -704,20 +719,36 @@ func HandleLogin(am *auth.Manager) gin.HandlerFunc {
 			return
 		}
 
-		// Set HttpOnly cookie — 7 day expiry, not accessible via JS (XSS protection)
-		// SameSite=Lax prevents CSRF on cross-site form submissions (most browsers default to Lax,
-		// but we set it explicitly for defense-in-depth). Secure=false because the gateway
-		// typically runs behind a reverse proxy that terminates TLS.
+		// D2: only admin keys can log into the dashboard. Inference-role keys can
+		// call /v1/* with a Bearer token, but the dashboard endpoints are
+		// admin-only — letting them in produces a redirect loop (dashboard XHR
+		// gets 401 → JS redirects to /login → login succeeds → loop).
+		if info, ok := am.Get(req.Key); !ok || info.Role != auth.RoleAdmin {
+			c.Data(200, "text/html; charset=utf-8", []byte(loginPageHTMLWithError("This key does not have dashboard access (admin role required)")))
+			return
+		}
+
+		// P3-3: issue a random session token bound to the key (not the key itself).
+		token, err := sessions.Create(req.Key)
+		if err != nil {
+			c.Data(200, "text/html; charset=utf-8", []byte(loginPageHTMLWithError("Session error")))
+			return
+		}
+
 		c.SetSameSite(http.SameSiteLaxMode)
-		c.SetCookie("foxrouters_session", req.Key, 7*24*3600, "/", "", false, true)
+		cookieSecure := os.Getenv("COOKIE_SECURE") != "0"
+		c.SetCookie("foxrouters_session", token, int(auth.SessionTTL.Seconds()), "/", "", cookieSecure, true)
 		c.Redirect(302, "/dashboard")
 	}
 }
 
 // HandleLogout clears the session cookie and redirects to /login.
-func HandleLogout() gin.HandlerFunc {
+func HandleLogout(sessions *auth.SessionStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.SetCookie("foxrouters_session", "", -1, "/", "", false, true)
+		token, _ := c.Cookie("foxrouters_session")
+		sessions.Revoke(token)
+		cookieSecure := os.Getenv("COOKIE_SECURE") != "0"
+		c.SetCookie("foxrouters_session", "", -1, "/", "", cookieSecure, true)
 		c.Redirect(302, "/login")
 	}
 }
@@ -726,16 +757,22 @@ func HandleLogout() gin.HandlerFunc {
 // CB KEY MANAGEMENT (delete + cleanup)
 // ============================================================================
 
-// HandleDeleteCBKey deletes a CodeBuddy key by its key string.
+// HandleDeleteCBKey deletes a CodeBuddy key by its key string (full or masked).
 func HandleDeleteCBKey(cbKM *upstream.CBKeyManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		key := c.Param("key")
-		if key == "" {
+		keyParam := c.Param("key")
+		if keyParam == "" {
 			c.JSON(400, gin.H{"error": "key required"})
 			return
 		}
-		if !cbKM.DeleteKey(key) {
-			c.JSON(404, gin.H{"error": "cb key not found", "key": key})
+		// Resolve masked key → full key (P3 #4: don't return full keys in lists)
+		fullKey := cbKM.ResolveKey(keyParam)
+		if fullKey == "" {
+			c.JSON(404, gin.H{"error": "cb key not found"})
+			return
+		}
+		if !cbKM.DeleteKey(fullKey) {
+			c.JSON(404, gin.H{"error": "cb key not found"})
 			return
 		}
 		remaining := cbKM.Len()

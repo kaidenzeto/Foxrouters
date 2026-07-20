@@ -118,6 +118,7 @@ func main() {
 
 	// Auth + rate limiter
 	authMgr := newAuthManager(db)
+	sessions := NewSessionStore() // P3-3: session token indirection (cookie ≠ API key)
 	rateLimiter := ratelimit.New(RATE_LIMIT_RPM, RATE_LIMIT_BURST, RATE_LIMIT_WINDOW)
 	// (rateLimiter previously carried a db handle for rate-limited request
 	//  logging, but nothing actually consumed it — dropped in the split.)
@@ -128,6 +129,21 @@ func main() {
 	if err := customReg.Load(); err != nil {
 		slog.Warn("custom registry Load failed, starting empty", "module", "custom", "error", err)
 	}
+
+	// Combos registry (v1.4.0). Redis-backed, cached in memory.
+	comboReg := NewComboRegistry(db)
+	if err := comboReg.Load(); err != nil {
+		slog.Warn("combo registry Load failed, starting empty", "module", "combo", "error", err)
+	}
+
+	// Proxy pool (v1.5.0). Redis-backed, cached in memory. Wired into
+	// internal/upstream so Grok / CodeBuddy / token-refresh HTTP calls
+	// route through enabled proxies (round-robin).
+	proxyPool := NewProxyPool(db)
+	if err := proxyPool.Load(); err != nil {
+		slog.Warn("proxy pool Load failed, starting empty", "module", "proxy-pool", "error", err)
+	}
+	setUpstreamProxyPool(proxyPool)
 
 	go autoRefreshWorker(grokAM)
 	go reenableWorker(grokAM)
@@ -146,6 +162,12 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+	// P2-1: Don't trust X-Forwarded-For/X-Real-IP from clients.
+	// Without this, attackers spoof XFF to bypass IP-based rate limits
+	// (login limiter) and IP-based tracking. RemoteAddr is the real source.
+	if err := r.SetTrustedProxies(nil); err != nil {
+		slog.Warn("failed to set trusted proxies", "error", err)
+	}
 
 	// Middleware: request ID, security headers, gzip compression, auth, rate limit
 	r.Use(ratelimit.RequestIDMiddleware())
@@ -154,22 +176,24 @@ func main() {
 	// Anthropic /v1/messages: normalise x-api-key → Authorization: Bearer
 	// BEFORE the main AuthMiddleware validates it.
 	r.Use(anthropicAuthMiddleware())
-	r.Use(AuthMiddleware(authMgr))
+	r.Use(AuthMiddleware(authMgr, sessions.Lookup))
 	r.Use(ratelimit.Middleware(rateLimiter, authMgr))
 
 	// API key management endpoints — admin only
 	adminAuth := AdminMiddleware(authMgr)
 	r.GET("/api/keys", adminAuth, handleListKeys(authMgr))
-	r.POST("/api/keys", adminAuth, handleCreateKey(authMgr))
-	r.DELETE("/api/keys/:key", adminAuth, handleDeleteKey(authMgr))
-	r.PUT("/api/keys/:key", adminAuth, handleUpdateKey(authMgr))
+	r.POST("/api/keys", csrfGuard(), adminAuth, handleCreateKey(authMgr))
+	r.DELETE("/api/keys/:key", csrfGuard(), adminAuth, handleDeleteKey(authMgr))
+	r.PUT("/api/keys/:key", csrfGuard(), adminAuth, handleUpdateKey(authMgr))
 	r.GET("/api/keys/:key/usage", adminAuth, handleKeyUsage(authMgr))
 
 	r.GET("/dashboard", handleDashboard())
-	r.GET("/login", handleLogin(authMgr))
-	r.POST("/login", handleLogin(authMgr))
-	r.GET("/logout", handleLogout())
-	r.GET("/health", handleHealth(grokAM, cbKM, hc, authMgr))
+	r.GET("/login", handleLogin(authMgr, sessions))
+	// P3 #6: rate limit /login POST by client IP (5/min, 20/hour) to prevent brute-force.
+	loginLimiter := newLoginLimiter()
+	r.POST("/login", loginLimiter.middleware(), handleLogin(authMgr, sessions))
+	r.GET("/logout", handleLogout(sessions))
+	r.GET("/health", handleHealth(grokAM, cbKM, hc, authMgr, sessions))
 	r.HEAD("/health", handleHealthMinimal())
 	// Prometheus scrape endpoint — public, no auth (scraper isolation is
 	// upstream's responsibility, e.g. a firewall / private network scrape).
@@ -196,15 +220,15 @@ func main() {
 		}
 		c.JSON(200, gin.H{"codebuddy_keys": stats})
 	})
-	r.POST("/accounts/refresh", adminAuth, handleRefresh(grokAM))
-	r.POST("/accounts/import", adminAuth, handleImportAccount(grokAM))
-	r.POST("/accounts/import/bulk", adminAuth, handleImportAccountBulk(grokAM))
-	r.POST("/cb/import", adminAuth, handleImportCBKey(cbKM))
-	r.POST("/cb/import/bulk", adminAuth, handleImportCBKeyBulk(cbKM))
-	r.DELETE("/accounts/:email", adminAuth, handleDeleteAccount(grokAM))
-	r.DELETE("/cb/keys/:key", adminAuth, handleDeleteCBKey(cbKM))
-	r.POST("/cleanup/disabled", adminAuth, handleCleanupDisabled(grokAM, cbKM))
-	r.POST("/cleanup/banned", adminAuth, handleCleanupBanned(grokAM))
+	r.POST("/accounts/refresh", csrfGuard(), adminAuth, handleRefresh(grokAM))
+	r.POST("/accounts/import", csrfGuard(), adminAuth, handleImportAccount(grokAM))
+	r.POST("/accounts/import/bulk", csrfGuard(), adminAuth, handleImportAccountBulk(grokAM))
+	r.POST("/cb/import", csrfGuard(), adminAuth, handleImportCBKey(cbKM))
+	r.POST("/cb/import/bulk", csrfGuard(), adminAuth, handleImportCBKeyBulk(cbKM))
+	r.DELETE("/accounts/:email", csrfGuard(), adminAuth, handleDeleteAccount(grokAM))
+	r.DELETE("/cb/keys/:key", csrfGuard(), adminAuth, handleDeleteCBKey(cbKM))
+	r.POST("/cleanup/disabled", csrfGuard(), adminAuth, handleCleanupDisabled(grokAM, cbKM))
+	r.POST("/cleanup/banned", csrfGuard(), adminAuth, handleCleanupBanned(grokAM))
 	r.GET("/history", adminAuth, handleHistory(db))
 	r.GET("/history/recent", adminAuth, handleRecentRequests(db))
 	r.GET("/history/detail/:id", adminAuth, handleHistoryDetail(db))
@@ -213,11 +237,27 @@ func main() {
 	// The /api/models/custom/*id catch-all preserves slashes in ids like
 	// "cb/kimi-k3" (gin's :id param would only match one non-slash segment).
 	r.GET("/api/models/custom", adminAuth, handleListCustomModels(customReg))
-	r.POST("/api/models/custom", adminAuth, handleAddCustomModel(customReg))
-	r.DELETE("/api/models/custom/*id", adminAuth, handleDeleteCustomModel(customReg))
+	r.POST("/api/models/custom", csrfGuard(), adminAuth, handleAddCustomModel(customReg))
+	r.DELETE("/api/models/custom/*id", csrfGuard(), adminAuth, handleDeleteCustomModel(customReg))
 	r.GET("/api/aliases", adminAuth, handleListAliases(customReg))
-	r.POST("/api/aliases", adminAuth, handleAddAlias(customReg))
-	r.DELETE("/api/aliases/:alias", adminAuth, handleDeleteAlias(customReg))
+	r.POST("/api/aliases", csrfGuard(), adminAuth, handleAddAlias(customReg))
+	r.DELETE("/api/aliases/*alias", csrfGuard(), adminAuth, handleDeleteAlias(customReg))
+
+	// Combos (v1.4.0) — admin only. Combos group models under a virtual
+	// "combo/<name>" alias with a strategy (fallback | round_robin).
+	r.GET("/api/combos", adminAuth, handleListCombos(comboReg))
+	r.POST("/api/combos", csrfGuard(), adminAuth, handleAddCombo(comboReg))
+	r.GET("/api/combos/*name", adminAuth, handleGetCombo(comboReg))
+	r.DELETE("/api/combos/*name", csrfGuard(), adminAuth, handleDeleteCombo(comboReg))
+
+	// Proxy pool (v1.5.0) — admin only. Dashboard-managed HTTP/SOCKS5
+	// proxies used by upstream (Grok/CodeBuddy/token-refresh) HTTP calls.
+	r.GET("/api/proxies", adminAuth, handleListProxies(proxyPool))
+	r.POST("/api/proxies", csrfGuard(), adminAuth, handleAddProxy(proxyPool))
+	r.PUT("/api/proxies/:id", csrfGuard(), adminAuth, handleUpdateProxy(proxyPool))
+	r.DELETE("/api/proxies/:id", csrfGuard(), adminAuth, handleDeleteProxy(proxyPool))
+	r.POST("/api/proxies/:id/toggle", csrfGuard(), adminAuth, handleToggleProxy(proxyPool))
+	r.POST("/api/proxies/:id/test", csrfGuard(), adminAuth, handleTestProxy(proxyPool))
 
 	// /v1/*path catch-all — gin's httprouter doesn't allow a static
 	// /v1/messages segment alongside /v1/*path, so we dispatch the
@@ -226,10 +266,10 @@ func main() {
 	// anthropicAuthMiddleware (rewrites x-api-key → Authorization: Bearer).
 	r.Any("/v1/*path", func(c *gin.Context) {
 		if c.Request.URL.Path == "/v1/messages" && c.Request.Method == http.MethodPost {
-			handleMessages(grokAM, cbKM, hc, authMgr, customReg)(c)
+			handleMessages(grokAM, cbKM, hc, authMgr, customReg, comboReg)(c)
 			return
 		}
-		proxyRequest(grokAM, cbKM, hc, authMgr, customReg)(c)
+		proxyRequest(grokAM, cbKM, hc, authMgr, customReg, comboReg)(c)
 	})
 
 	r.GET("/", func(c *gin.Context) {

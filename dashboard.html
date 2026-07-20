@@ -937,9 +937,9 @@ body {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
       Models
     </button>
-    <button class="nav-item" data-route="#/custom" onclick="navigateTo('#/custom')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      Custom Models
+    <button class="nav-item" data-route="#/proxies" onclick="navigateTo('#/proxies')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      Proxies
     </button>
   </nav>
   <div class="sidebar-footer">
@@ -1163,6 +1163,13 @@ body {
 
     <!-- ════════ PAGE 4: MODELS ════════ -->
     <div class="page" id="page-models">
+      <div style="display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid var(--border-strong)">
+        <button id="mtab-models" onclick="switchMTab('models')" style="padding:10px 18px;background:none;border:none;border-bottom:2px solid var(--brand);color:var(--text-primary);font-size:13px;font-weight:500;cursor:pointer">Models</button>
+        <button id="mtab-custom" onclick="switchMTab('custom')" style="padding:10px 18px;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-tertiary);font-size:13px;font-weight:500;cursor:pointer">Custom</button>
+        <button id="mtab-combos" onclick="switchMTab('combos')" style="padding:10px 18px;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-tertiary);font-size:13px;font-weight:500;cursor:pointer">Combos</button>
+      </div>
+
+      <div id="mtab-pane-models">
       <div class="panel">
         <div class="panel-head">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
@@ -1182,10 +1189,74 @@ body {
           </div>
         </div>
       </div>
+      </div>
+
+      <div id="mtab-pane-combos" style="display:none">
+      <div class="panel">
+        <div class="panel-head">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+          <h3>Combos</h3>
+          <div style="margin-left:auto">
+            <button class="btn-ghost" onclick="loadCombos()" style="padding:5px 12px;font-size:12px">Refresh</button>
+          </div>
+        </div>
+        <div style="padding:16px">
+          <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:14px;line-height:1.5">
+            Group models under a single virtual name — call it as <code>combo/&lt;name&gt;</code>.
+            <strong>Fallback</strong> tries models in order (retry on 5xx). <strong>Round Robin</strong> rotates models across requests.
+          </div>
+          <div style="display:grid;grid-template-columns:1.5fr 1fr 2fr auto;gap:8px;margin-bottom:12px;align-items:end">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Name</label>
+              <input type="text" id="cbxName" placeholder="smart-fallback" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:var(--mono)" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Strategy</label>
+              <select id="cbxStrategy" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px">
+                <option value="fallback">Fallback</option>
+                <option value="round_robin">Round Robin</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Description (optional)</label>
+              <input type="text" id="cbxDesc" placeholder="GPT then Claude" style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px" />
+            </div>
+            <button class="btn-primary" onclick="addCombo()" style="padding:7px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">+ Create</button>
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Models</label>
+            <div style="display:flex;gap:6px;margin-bottom:4px">
+              <button type="button" class="btn-ghost" onclick="toggleAllComboModels(true)" style="padding:3px 8px;font-size:11px">Select All</button>
+              <button type="button" class="btn-ghost" onclick="toggleAllComboModels(false)" style="padding:3px 8px;font-size:11px">Clear</button>
+              <button type="button" class="btn-ghost" onclick="toggleComboGroup('grok')" style="padding:3px 8px;font-size:11px">Grok only</button>
+              <button type="button" class="btn-ghost" onclick="toggleComboGroup('cb')" style="padding:3px 8px;font-size:11px">CodeBuddy only</button>
+              <span id="cbxSelectedCount" style="margin-left:auto;font-size:11px;color:var(--text-tertiary);align-self:center">0 selected</span>
+            </div>
+            <div id="cbxModelSelector" style="border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--bg);max-height:200px;overflow-y:auto;padding:8px">
+              <div style="text-align:center;padding:8px;color:var(--text-tertiary);font-size:12px">Loading models...</div>
+            </div>
+          </div>
+          <div id="cbxError" style="display:none;color:var(--red);font-size:12px;padding:6px 10px;background:rgba(255,80,80,0.08);border-radius:var(--radius-sm);margin-bottom:8px"></div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr style="background:var(--bg);color:var(--text-tertiary);text-align:left">
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Name</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Strategy</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Models</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong)">Description</th>
+                <th style="padding:8px;border-bottom:1px solid var(--border-strong);width:1%"></th>
+              </tr>
+            </thead>
+            <tbody id="cbxTableBody">
+              <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-tertiary)">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </div>
     </div>
 
-    <!-- ════════ PAGE 5: CUSTOM MODELS & ALIASES (admin) ════════ -->
-    <div class="page" id="page-custom">
+      <div id="mtab-pane-custom" style="display:none">
       <!-- Custom Models -->
       <div class="panel" style="margin-bottom:20px">
         <div class="panel-head">
@@ -1272,7 +1343,7 @@ body {
           </table>
         </div>
       </div>
-    </div>
+      </div>
 
     <!-- Key Modal -->
     <div class="modal-overlay" id="keyModal" onclick="if(event.target===this)closeKeyModal()">
@@ -1346,6 +1417,178 @@ body {
       </div>
     </div>
 
+    <!-- ════════ PAGE 5: PROXIES (v1.5.0) ════════ -->
+    <div class="page" id="page-proxies">
+      <div class="stats-grid" id="proxyStatsGrid">
+        <div class="stat-card">
+          <div class="stat-label">Total Proxies</div>
+          <div class="stat-value" id="proxyTotal">—</div>
+          <div class="stat-sub">http + socks5</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Enabled</div>
+          <div class="stat-value" id="proxyEnabled">—</div>
+          <div class="stat-sub">round-robin pool</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Disabled</div>
+          <div class="stat-value" id="proxyDisabled">—</div>
+          <div class="stat-sub">bypassed</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Active (5m)</div>
+          <div class="stat-value" id="proxyActive">—</div>
+          <div class="stat-sub">recently routed</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          <h3>Proxy Pool</h3>
+          <span class="head-meta" id="proxyPoolMeta"></span>
+          <div style="margin-left:auto;display:flex;gap:8px">
+            <button class="btn-primary" onclick="showAddProxyModal()" style="padding:6px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">+ Add Proxy</button>
+            <button class="btn-ghost" onclick="loadProxies()" style="padding:6px 12px;font-size:12px">Refresh</button>
+          </div>
+        </div>
+        <div class="tbl-scroll" style="max-height:520px">
+          <table class="tbl" id="proxyTable">
+            <thead><tr>
+              <th>Label</th><th>Protocol</th><th>Host:Port</th><th>Auth</th><th>Upstreams</th><th>Status</th><th>Fails</th><th>Last Used</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="proxyBody"><tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text-tertiary)">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div id="proxyTestResult" style="padding:8px 16px;font-size:12px;color:var(--text-tertiary);border-top:1px solid var(--border-strong);display:none"></div>
+      </div>
+    </div>
+
+    <!-- ════════ ADD PROXY MODAL ════════ -->
+    <div class="modal-overlay" id="addProxyModal" onclick="if(event.target===this)closeAddProxyModal()">
+      <div class="modal-box" style="max-width:520px">
+        <div class="modal-head">
+          <h3>Add Proxy</h3>
+          <button class="modal-close" onclick="closeAddProxyModal()">×</button>
+        </div>
+        <div style="padding:16px;display:grid;gap:12px">
+          <div>
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Protocol</label>
+            <select id="pxProtocol" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px">
+              <option value="http">HTTP</option>
+              <option value="socks5">SOCKS5</option>
+            </select>
+          </div>
+          <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Host</label>
+              <input type="text" id="pxHost" placeholder="proxy.example.com" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--mono)" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Port</label>
+              <input type="number" id="pxPort" placeholder="8080" min="1" max="65535" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--mono)" />
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Username (optional)</label>
+              <input type="text" id="pxUsername" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Password (optional)</label>
+              <input type="password" id="pxPassword" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px" />
+            </div>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Label (optional)</label>
+            <input type="text" id="pxLabel" placeholder="datacenter-us-east" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px" />
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:6px">Route for upstreams</label>
+            <div style="display:flex;gap:14px;align-items:center;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm)">
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                <input type="checkbox" class="px-upstream" data-scope="all" data-target="add" checked /> All
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                <input type="checkbox" class="px-upstream" data-scope="grok" data-target="add" /> Grok
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                <input type="checkbox" class="px-upstream" data-scope="codebuddy" data-target="add" /> CodeBuddy
+              </label>
+            </div>
+          </div>
+          <div id="pxError" style="display:none;color:var(--red);font-size:12px;padding:6px 10px;background:rgba(255,80,80,0.08);border-radius:var(--radius-sm)"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button class="btn-ghost" onclick="closeAddProxyModal()" style="padding:8px 14px;font-size:12px">Cancel</button>
+            <button class="btn-primary" onclick="addProxy()" style="padding:8px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">Add Proxy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════ EDIT PROXY MODAL ════════ -->
+    <div class="modal-overlay" id="editProxyModal" onclick="if(event.target===this)closeEditProxyModal()">
+      <div class="modal-box" style="max-width:520px">
+        <div class="modal-head">
+          <h3>Edit Proxy</h3>
+          <button class="modal-close" onclick="closeEditProxyModal()">×</button>
+        </div>
+        <div style="padding:16px;display:grid;gap:12px">
+          <input type="hidden" id="epxId" />
+          <div>
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Protocol</label>
+            <select id="epxProtocol" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px">
+              <option value="http">HTTP</option>
+              <option value="socks5">SOCKS5</option>
+            </select>
+          </div>
+          <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Host</label>
+              <input type="text" id="epxHost" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--mono)" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Port</label>
+              <input type="number" id="epxPort" min="1" max="65535" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--mono)" />
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Username</label>
+              <input type="text" id="epxUsername" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Password (blank = keep)</label>
+              <input type="password" id="epxPassword" placeholder="***" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px" />
+            </div>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Label</label>
+            <input type="text" id="epxLabel" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px" />
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:6px">Route for upstreams</label>
+            <div style="display:flex;gap:14px;align-items:center;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm)">
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                <input type="checkbox" class="px-upstream" data-scope="all" data-target="edit" /> All
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                <input type="checkbox" class="px-upstream" data-scope="grok" data-target="edit" /> Grok
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                <input type="checkbox" class="px-upstream" data-scope="codebuddy" data-target="edit" /> CodeBuddy
+              </label>
+            </div>
+          </div>
+          <div id="epxError" style="display:none;color:var(--red);font-size:12px;padding:6px 10px;background:rgba(255,80,80,0.08);border-radius:var(--radius-sm)"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button class="btn-ghost" onclick="closeEditProxyModal()" style="padding:8px 14px;font-size:12px">Cancel</button>
+            <button class="btn-primary" onclick="saveEditProxy()" style="padding:8px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /content -->
 
   <div class="footer-bar" id="footerUpdate" style="padding:0 28px 16px"></div>
@@ -1395,14 +1638,35 @@ function hasUsableDefaultKey() {
 async function fetchJSON(url) {
   var r = await fetch(url, { credentials: 'same-origin' });
   if (r.status === 401) {
+    // D8: stop polling before navigating.
+    window._stopped = true;
     window.location.href = '/login';
-    throw new Error('Session expired — redirecting to login');
+    // D7: throw a distinguishable sentinel so callers can swallow it.
+    throw new Error('__redirect__');
   }
   if (!r.ok) {
     throw new Error('HTTP ' + r.status + ' on ' + url);
   }
   return r.json();
 }
+
+// D7: suppress the `__redirect__` sentinel so 15+ .catch(alert(e.message)) sites
+// don't briefly flash "Error: __redirect__" while the page unloads.
+window.addEventListener('unhandledrejection', function(ev) {
+  if (ev.reason && ev.reason.message === '__redirect__') ev.preventDefault();
+});
+window.addEventListener('error', function(ev) {
+  if (ev.error && ev.error.message === '__redirect__') ev.preventDefault();
+});
+// Wrap window.alert once so any lingering `alert('... ' + e.message)` calls
+// during page teardown silently drop the sentinel string.
+(function(){
+  var _origAlert = window.alert.bind(window);
+  window.alert = function(msg) {
+    if (typeof msg === 'string' && msg.indexOf('__redirect__') !== -1) return;
+    return _origAlert(msg);
+  };
+})();
 
 // fetchJSON with method/body support for CRUD operations
 async function apiFetch(url, opts) {
@@ -1413,8 +1677,13 @@ async function apiFetch(url, opts) {
   if (opts.body) { fetchOpts.body = opts.body; }
   var r = await fetch(url, fetchOpts);
   if (r.status === 401) {
+    // D8: stop background polling BEFORE navigating so any in-flight interval
+    // ticks after this point short-circuit instead of piling up 401s.
+    window._stopped = true;
     window.location.href = '/login';
-    return;
+    // D7: throw a distinguishable sentinel — returning undefined caused
+    // TypeError when callers destructured the (missing) result.
+    throw new Error('__redirect__');
   }
   if (!r.ok && r.status !== 200) {
     var errBody = await r.text().catch(function() { return ''; });
@@ -1430,8 +1699,8 @@ var routes = {
   '#/':         { page: 'page-dashboard', title: 'Dashboard',   meta: 'Live · auto-refresh 5s' },
   '#/accounts': { page: 'page-accounts',  title: 'Accounts & Keys', meta: 'Live · auto-refresh 5s' },
   '#/keys':     { page: 'page-keys',      title: 'Gateway API Keys', meta: 'Redis-backed · CRUD' },
-  '#/models':   { page: 'page-models',    title: 'Models', meta: 'Usage stats · aliases' },
-  '#/custom':   { page: 'page-custom',    title: 'Custom Models & Aliases', meta: 'Runtime-configurable · Redis-backed' }
+  '#/models':   { page: 'page-models',    title: 'Models', meta: 'Usage stats · aliases · custom · combos' },
+  '#/proxies':  { page: 'page-proxies',   title: 'Proxies', meta: 'HTTP/SOCKS5 upstream proxy pool · round-robin' }
 };
 
 function navigateTo(hash) {
@@ -1446,6 +1715,11 @@ function router() {
   document.querySelectorAll('.page').forEach(function(p) { p.classList.remove('active'); });
   var pageEl = document.getElementById(route.page);
   if (pageEl) pageEl.classList.add('active');
+
+  // Scroll to top on page change
+  window.scrollTo(0, 0);
+  var content = document.getElementById('content');
+  if (content) content.scrollTop = 0;
 
   // Nav items
   document.querySelectorAll('.nav-item').forEach(function(n) {
@@ -1464,9 +1738,8 @@ function router() {
   if (hash === '#/models') {
     loadModels();
   }
-  if (hash === '#/custom') {
-    loadCustomModels();
-    loadAliases();
+  if (hash === '#/proxies') {
+    if (typeof loadProxies === 'function') loadProxies();
   }
 }
 
@@ -1489,10 +1762,83 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// ══════════════════════════════════════════════════════════
+// GLOBAL DELETE/EDIT HANDLERS (XSS-safe via data-* attributes)
+// Replaces vulnerable inline onclick handlers. Event delegation
+// on document so dynamically-rendered buttons auto-bind.
+// ══════════════════════════════════════════════════════════
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('button[data-key], button[data-email], button[data-id], button[data-alias], button[data-name], button[data-model], button[data-proxy-id]');
+  if (!btn) return;
+  var v;
+  if (btn.classList.contains('delete-cb-btn')) {
+    v = btn.getAttribute('data-key');
+    if (v) deleteCBKey(v);
+  } else if (btn.classList.contains('delete-grok-btn')) {
+    v = btn.getAttribute('data-email');
+    if (v) deleteGrokAccount(v);
+  } else if (btn.classList.contains('delete-key-btn')) {
+    v = btn.getAttribute('data-key');
+    if (v) deleteKey(v);
+  } else if (btn.classList.contains('edit-key-btn')) {
+    v = btn.getAttribute('data-key');
+    if (v) showEditKeyModal(v);
+  } else if (btn.classList.contains('delete-custom-btn')) {
+    v = btn.getAttribute('data-id');
+    if (v) deleteCustomModel(v);
+  } else if (btn.classList.contains('delete-alias-btn')) {
+    v = btn.getAttribute('data-alias');
+    if (v) deleteAlias(v);
+  } else if (btn.classList.contains('delete-combo-btn')) {
+    v = btn.getAttribute('data-name');
+    if (v) deleteCombo(v);
+  } else if (btn.classList.contains('quick-test-btn')) {
+    // D1/S3: XSS-safe replacement for inline onclick="quickTestModel(...)".
+    // Custom-model ids can contain user input — passing them through an
+    // attribute + textContent lookup avoids the JS-string escape hole.
+    v = btn.getAttribute('data-model');
+    if (v) quickTestModel(v, btn);
+  } else if (btn.classList.contains('delete-proxy-btn')) {
+    v = btn.getAttribute('data-proxy-id');
+    if (v) deleteProxy(v);
+  } else if (btn.classList.contains('toggle-proxy-btn')) {
+    v = btn.getAttribute('data-proxy-id');
+    if (v) toggleProxy(v);
+  } else if (btn.classList.contains('test-proxy-btn')) {
+    v = btn.getAttribute('data-proxy-id');
+    if (v) testProxy(v, btn);
+  } else if (btn.classList.contains('edit-proxy-btn')) {
+    v = btn.getAttribute('data-proxy-id');
+    if (v) showEditProxyModal(v);
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+// PAGINATION HANDLERS (P4-2: replace legacy inline onclick)
+// ══════════════════════════════════════════════════════════
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('button.pg-btn');
+  if (!btn || btn.disabled) return;
+  var action = btn.getAttribute('data-action');
+  var page = btn.getAttribute('data-page');
+  if (btn.classList.contains('pg-grok-prev') || btn.classList.contains('pg-grok-next') || btn.classList.contains('pg-grok-num')) {
+    if (action === 'prev') window._grokPage = Math.max(1, (window._grokPage || 1) - 1);
+    else if (action === 'next') window._grokPage = (window._grokPage || 1) + 1;
+    else if (page) window._grokPage = parseInt(page, 10);
+    renderGrokPage();
+  } else if (btn.classList.contains('pg-cb-prev') || btn.classList.contains('pg-cb-next') || btn.classList.contains('pg-cb-num')) {
+    if (action === 'prev') window._cbPage = Math.max(1, (window._cbPage || 1) - 1);
+    else if (action === 'next') window._cbPage = (window._cbPage || 1) + 1;
+    else if (page) window._cbPage = parseInt(page, 10);
+    renderCBPage();
+  }
+});
+
 /* ══════════════════════════════════════════════════════════
    REFRESH (health + accounts + cb-stats + models)
    ══════════════════════════════════════════════════════════ */
 async function refresh() {
+  if (window._stopped) return; // D8: skip after session expired
   try {
     var results = await Promise.all([
       fetchJSON('/health'),
@@ -1609,7 +1955,7 @@ function renderGrokPage() {
       '<td class="muted" style="font-size:11px">' + expAt + '</td>' +
       '<td class="muted" style="font-size:11px">' + lastRef + '</td>' +
       '<td class="muted" style="font-size:11px">' + disAt + '</td>' +
-      '<td><button class="btn-ghost" onclick="deleteGrokAccount(\'' + escHtml(a.email) + '\')" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
+      '<td><button class="btn-ghost delete-grok-btn" data-email="' + escHtml(a.email) + '" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
     '</tr>';
   }
   document.getElementById('grokBody').innerHTML = gRows || '<tr><td colspan="6" class="history-empty">No Grok accounts loaded</td></tr>';
@@ -1625,29 +1971,29 @@ function renderGrokPage() {
   });
   html += '</select>';
   // Prev
-  html += '<button onclick="window._grokPage--;renderGrokPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px"' + (page <= 1 ? ' disabled' : '') + '>‹ Prev</button>';
+  html += '<button class="pg-btn pg-grok-prev" data-action="prev" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px"' + (page <= 1 ? ' disabled' : '') + '>‹ Prev</button>';
   // Page numbers
   var maxButtons = 7;
   var fromPg = Math.max(1, page - Math.floor(maxButtons / 2));
   var toPg = Math.min(totalPages, fromPg + maxButtons - 1);
   if (toPg - fromPg < maxButtons - 1) fromPg = Math.max(1, toPg - maxButtons + 1);
   if (fromPg > 1) {
-    html += '<button onclick="window._grokPage=1;renderGrokPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">1</button>';
+    html += '<button class="pg-btn pg-grok-num" data-page="1" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">1</button>';
     if (fromPg > 2) html += '<span style="padding:0 2px">…</span>';
   }
   for (var p = fromPg; p <= toPg; p++) {
     if (p === page) {
       html += '<button style="padding:4px 10px;border:1px solid var(--brand);border-radius:var(--radius-sm);background:var(--brand);color:#fff;font-size:12px;cursor:default">' + p + '</button>';
     } else {
-      html += '<button onclick="window._grokPage=' + p + ';renderGrokPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">' + p + '</button>';
+      html += '<button class="pg-btn pg-grok-num' + (p === page ? ' pg-active' : '') + '" data-page="' + p + '" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">' + p + '</button>';
     }
   }
   if (toPg < totalPages) {
     if (toPg < totalPages - 1) html += '<span style="padding:0 2px">…</span>';
-    html += '<button onclick="window._grokPage=' + totalPages + ';renderGrokPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">' + totalPages + '</button>';
+    html += '<button class="pg-btn pg-grok-num" data-page="' + totalPages + '" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">' + totalPages + '</button>';
   }
   // Next
-  html += '<button onclick="window._grokPage++;renderGrokPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px"' + (page >= totalPages ? ' disabled' : '') + '>Next ›</button>';
+  html += '<button class="pg-btn pg-grok-next" data-action="next" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px"' + (page >= totalPages ? ' disabled' : '') + '>Next ›</button>';
   // Info
   html += '<span style="margin-left:auto">' + (start + 1) + '–' + end + ' of ' + all.length + '</span>';
   pager.innerHTML = html;
@@ -1679,7 +2025,7 @@ function renderCBPage() {
       '<td><div class="pbar"><div class="pbar-fill ' + color + '" style="width:' + pct + '%"></div></div>' + (k.credit_limit - k.credits_used).toFixed(1) + ' left</td>' +
       '<td class="mono">' + k.total_requests + '</td>' +
       '<td>' + status + '</td>' +
-      '<td><button class="btn-ghost" onclick="deleteCBKey(\'' + escHtml(k.key) + '\')" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
+      '<td><button class="btn-ghost delete-cb-btn" data-key="' + escHtml(k.key) + '" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button></td>' +
     '</tr>';
   }
   document.getElementById('cbBody').innerHTML = cbRows || '<tr><td colspan="6" class="history-empty">No CodeBuddy keys loaded</td></tr>';
@@ -1694,27 +2040,27 @@ function renderCBPage() {
     html += '<option value="' + n + '"' + (size === n ? ' selected' : '') + '>' + n + '</option>';
   });
   html += '</select>';
-  html += '<button onclick="window._cbPage--;renderCBPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px"' + (page <= 1 ? ' disabled' : '') + '>‹ Prev</button>';
+  html += '<button class="pg-btn pg-cb-prev" data-action="prev" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px"' + (page <= 1 ? ' disabled' : '') + '>‹ Prev</button>';
   var maxButtons = 7;
   var fromPg = Math.max(1, page - Math.floor(maxButtons / 2));
   var toPg = Math.min(totalPages, fromPg + maxButtons - 1);
   if (toPg - fromPg < maxButtons - 1) fromPg = Math.max(1, toPg - maxButtons + 1);
   if (fromPg > 1) {
-    html += '<button onclick="window._cbPage=1;renderCBPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">1</button>';
+    html += '<button class="pg-btn pg-cb-num" data-page="1" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">1</button>';
     if (fromPg > 2) html += '<span style="padding:0 2px">…</span>';
   }
   for (var p = fromPg; p <= toPg; p++) {
     if (p === page) {
       html += '<button style="padding:4px 10px;border:1px solid var(--brand);border-radius:var(--radius-sm);background:var(--brand);color:#fff;font-size:12px;cursor:default">' + p + '</button>';
     } else {
-      html += '<button onclick="window._cbPage=' + p + ';renderCBPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">' + p + '</button>';
+      html += '<button class="pg-btn pg-cb-num" data-page="' + p + '" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">' + p + '</button>';
     }
   }
   if (toPg < totalPages) {
     if (toPg < totalPages - 1) html += '<span style="padding:0 2px">…</span>';
-    html += '<button onclick="window._cbPage=' + totalPages + ';renderCBPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">' + totalPages + '</button>';
+    html += '<button class="pg-btn pg-cb-num" data-page="' + totalPages + '" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px">' + totalPages + '</button>';
   }
-  html += '<button onclick="window._cbPage++;renderCBPage()" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px"' + (page >= totalPages ? ' disabled' : '') + '>Next ›</button>';
+  html += '<button class="pg-btn pg-cb-next" data-action="next" style="padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;font-size:12px"' + (page >= totalPages ? ' disabled' : '') + '>Next ›</button>';
   html += '<span style="margin-left:auto">' + (start + 1) + '–' + end + ' of ' + all.length + '</span>';
   pager.innerHTML = html;
 }
@@ -1775,6 +2121,7 @@ async function runTest() {
 var historyLogs = [];
 
 async function loadHistory() {
+  if (window._stopped) return; // D8: skip after session expired
   try {
     var results = await Promise.all([
       fetchJSON('/history?hours=24'),
@@ -2040,8 +2387,8 @@ function loadGatewayKeys() {
         '<td style="padding:10px;text-align:right;font-family:var(--mono);color:var(--text-tertiary)">' + formatNum(k.requests) + '</td>' +
         '<td style="padding:10px;text-align:center">' + statusBadge + '</td>' +
         '<td style="padding:10px;text-align:right">' +
-          '<button class="btn-ghost" onclick="showEditKeyModal(\'' + k.key_masked + '\')" style="padding:3px 8px;font-size:12px">Edit</button> ' +
-          '<button class="btn-ghost" onclick="deleteKey(\'' + k.key_masked + '\')" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button>' +
+          '<button class="btn-ghost edit-key-btn" data-key="' + escHtml(k.key_masked) + '" style="padding:3px 8px;font-size:12px">Edit</button> ' +
+          '<button class="btn-ghost delete-key-btn" data-key="' + escHtml(k.key_masked) + '" style="padding:3px 8px;font-size:12px;color:var(--red)">Delete</button>' +
         '</td>' +
       '</tr>';
     });
@@ -2068,6 +2415,168 @@ var aliasMap = {
   'grok-4.5-low':    { upstream: 'grok-4.5', effort: 'low' },
   'grok-4.5-xhigh': { upstream: 'grok-4.5', effort: 'high' }
 };
+
+function switchMTab(tab) {
+  var panes = ['models', 'custom', 'combos'];
+  panes.forEach(function(t) {
+    var pane = document.getElementById('mtab-pane-' + t);
+    var btn = document.getElementById('mtab-' + t);
+    if (!pane || !btn) return;
+    if (t === tab) {
+      pane.style.display = '';
+      btn.style.borderBottom = '2px solid var(--brand)';
+      btn.style.color = 'var(--text-primary)';
+    } else {
+      pane.style.display = 'none';
+      btn.style.borderBottom = '2px solid transparent';
+      btn.style.color = 'var(--text-tertiary)';
+    }
+  });
+  if (tab === 'custom') {
+    loadCustomModels();
+    loadAliases();
+  }
+  if (tab === 'combos') {
+    loadCombos();
+    loadComboModelSelector();
+  }
+}
+
+// === Combo Model Selector (checkbox-based, mirip API keys selector) ===
+var _comboModelsCache = [];
+
+function loadComboModelSelector() {
+  var container = document.getElementById('cbxModelSelector');
+  if (!container) return;
+  if (_comboModelsCache.length > 0) {
+    renderComboModelSelector(_comboModelsCache);
+    return;
+  }
+  container.innerHTML = '<div style="text-align:center;padding:8px;color:var(--text-tertiary);font-size:12px">Loading models...</div>';
+  fetchJSON('/v1/models').then(function(data) {
+    _comboModelsCache = (data.data || []).map(function(m) { return m.id; }).sort();
+    renderComboModelSelector(_comboModelsCache);
+  }).catch(function(e) {
+    container.innerHTML = '<div style="padding:8px;color:var(--red);font-size:12px">Failed to load: ' + escHtml(e.message) + '</div>';
+  });
+}
+
+function renderComboModelSelector(models) {
+  var container = document.getElementById('cbxModelSelector');
+  if (!container) return;
+  if (!models || models.length === 0) {
+    container.innerHTML = '<div style="padding:8px;color:var(--text-tertiary);font-size:12px">No models available</div>';
+    return;
+  }
+  var groups = {};
+  models.forEach(function(m) {
+    var prefix = m.startsWith('grok-') ? 'grok' : (m.startsWith('cb/') ? 'cb' : (m.startsWith('combo/') ? 'combo' : 'other'));
+    if (!groups[prefix]) groups[prefix] = [];
+    groups[prefix].push(m);
+  });
+  var html = '';
+  ['grok', 'cb', 'combo', 'other'].forEach(function(prefix) {
+    if (!groups[prefix]) return;
+    var label = prefix === 'grok' ? 'Grok' : (prefix === 'cb' ? 'CodeBuddy' : (prefix === 'combo' ? 'Combos' : 'Other'));
+    html += '<div style="margin-bottom:6px">';
+    html += '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border);margin-bottom:4px">';
+    html += '<span style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px">' + escHtml(label) + '</span>';
+    html += '</div>';
+    groups[prefix].forEach(function(m) {
+      html += '<label style="display:flex;align-items:center;gap:6px;padding:3px 8px;cursor:pointer;font-size:12px">';
+      html += '<input type="checkbox" class="comboModelCheckbox" value="' + escHtml(m) + '" style="accent-color:var(--brand)" onchange="updateComboSelectedCount()" />';
+      html += '<span style="font-family:var(--mono);color:var(--text-secondary)">' + escHtml(m) + '</span>';
+      html += '</label>';
+    });
+    html += '</div>';
+  });
+  container.innerHTML = html;
+  updateComboSelectedCount();
+}
+
+function getSelectedComboModels() {
+  var checkboxes = document.querySelectorAll('.comboModelCheckbox');
+  var selected = [];
+  checkboxes.forEach(function(cb) {
+    if (cb.checked && cb.value) selected.push(cb.value);
+  });
+  return selected;
+}
+
+function toggleAllComboModels(check) {
+  var checkboxes = document.querySelectorAll('.comboModelCheckbox');
+  checkboxes.forEach(function(cb) { cb.checked = check; });
+  updateComboSelectedCount();
+}
+
+function toggleComboGroup(prefix) {
+  var checkboxes = document.querySelectorAll('.comboModelCheckbox');
+  checkboxes.forEach(function(cb) {
+    var isGroup = (prefix === 'grok' && cb.value.startsWith('grok-')) ||
+                  (prefix === 'cb' && cb.value.startsWith('cb/'));
+    cb.checked = isGroup;
+  });
+  updateComboSelectedCount();
+}
+
+function updateComboSelectedCount() {
+  var count = getSelectedComboModels().length;
+  var el = document.getElementById('cbxSelectedCount');
+  if (el) el.textContent = count + ' selected';
+}
+
+// ══════════════════════════════════════════════════════════
+// MODEL CAPABILITIES (badges: Vision, Reasoning, Code, Fast, Long-ctx)
+// ══════════════════════════════════════════════════════════
+function modelCaps(id) {
+  var m = id.toLowerCase();
+  var caps = [];
+
+  // Vision (multimodal image input)
+  if (m.indexOf('grok-4') >= 0 || m.indexOf('gpt-4o') >= 0 ||
+      m.indexOf('gpt-4.1') >= 0 || m.indexOf('gpt-5') >= 0 ||
+      m.indexOf('claude') >= 0 || m.indexOf('gemini') >= 0 ||
+      m.indexOf('glm-5') >= 0) {
+    caps.push('<span title="Image input" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(100,181,246,0.14);color:#64b5f6;font-weight:600;letter-spacing:0.3px">👁 Vision</span>');
+  }
+
+  // Reasoning (extended thinking — verified via reasoning_tokens in usage)
+  // Almost all modern models support reasoning_effort param. gpt-4.1 rejects it.
+  if (m.indexOf('o3') >= 0 || m.indexOf('o4') >= 0 ||
+      m.indexOf('grok-4') >= 0 ||
+      m.indexOf('-reasoning') >= 0 || m.indexOf('deepseek') >= 0 ||
+      m.indexOf('claude-opus') >= 0 || m.indexOf('kimi') >= 0 ||
+      m.indexOf('gpt-5') >= 0 || m.indexOf('glm-5') >= 0 ||
+      m.indexOf('gemini-3') >= 0) {
+    caps.push('<span title="Chain-of-thought reasoning (reasoning_effort param)" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(171,71,188,0.14);color:#ab47bc;font-weight:600;letter-spacing:0.3px">🧠 Reasoning</span>');
+  }
+
+  // Code (specialized coding models)
+  if (m.indexOf('codex') >= 0 || m.indexOf('code') >= 0 ||
+      m.indexOf('grok-code') >= 0 || m.indexOf('kimi') >= 0) {
+    caps.push('<span title="Code generation" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(129,199,132,0.14);color:#81c784;font-weight:600;letter-spacing:0.3px">💻 Code</span>');
+  }
+
+  // Fast (low-latency / cheap)
+  if (m.indexOf('flash') >= 0 || m.indexOf('fast') >= 0 ||
+      m.indexOf('haiku') >= 0 || m.indexOf('mini') >= 0 ||
+      m.indexOf('flash-lite') >= 0) {
+    caps.push('<span title="Low latency" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(255,183,77,0.14);color:#ffb74d;font-weight:600;letter-spacing:0.3px">⚡ Fast</span>');
+  }
+
+  // Long-context (1M+ tokens)
+  if (m.indexOf('1m') >= 0 || m.indexOf('2.5-pro') >= 0 ||
+      m.indexOf('3.1-pro') >= 0 || m.indexOf('3.0-pro') >= 0) {
+    caps.push('<span title="1M+ token context" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(255,138,101,0.14);color:#ff8a65;font-weight:600;letter-spacing:0.3px">📝 Long-ctx</span>');
+  }
+
+  // Grok reasoning_effort aliases
+  if (m.indexOf('grok-4.5-') >= 0 && m.indexOf('none') < 0) {
+    caps.push('<span title="Tunable reasoning_effort" style="padding:2px 6px;border-radius:8px;font-size:10px;background:rgba(129,199,132,0.14);color:#81c784;font-weight:600;letter-spacing:0.3px">🎚 Effort</span>');
+  }
+
+  return caps.length ? caps.join(' ') : '<span style="color:var(--text-tertiary);font-size:11px">—</span>';
+}
 
 async function loadModels() {
   var container = document.getElementById('modelsContainer');
@@ -2113,6 +2622,7 @@ async function loadModels() {
       html += '<thead><tr style="border-bottom:1px solid var(--border-strong)">' +
         '<th style="text-align:left;padding:8px 10px;color:var(--text-tertiary);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Model</th>' +
         '<th style="text-align:left;padding:8px 10px;color:var(--text-tertiary);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Type</th>' +
+        '<th style="text-align:left;padding:8px 10px;color:var(--text-tertiary);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Capabilities</th>' +
         '<th style="text-align:right;padding:8px 10px;color:var(--text-tertiary);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Requests</th>' +
         '<th style="text-align:right;padding:8px 10px;color:var(--text-tertiary);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Tokens In</th>' +
         '<th style="text-align:right;padding:8px 10px;color:var(--text-tertiary);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Tokens Out</th>' +
@@ -2139,12 +2649,13 @@ async function loadModels() {
         html += '<tr style="border-bottom:1px solid var(--border)">' +
           '<td style="padding:10px;font-family:var(--mono);font-size:12px;color:var(--text-primary)">' + escHtml(id) + '</td>' +
           '<td style="padding:10px">' + typeLabel + '</td>' +
+          '<td style="padding:10px">' + modelCaps(id) + '</td>' +
           '<td style="padding:10px;text-align:right;font-family:var(--mono);color:var(--text-secondary)">' + (reqs > 0 ? formatNum(reqs) : '—') + '</td>' +
           '<td style="padding:10px;text-align:right;font-family:var(--mono);color:var(--text-secondary)">' + (tokIn > 0 ? formatNum(tokIn) : '—') + '</td>' +
           '<td style="padding:10px;text-align:right;font-family:var(--mono);color:var(--text-secondary)">' + (tokOut > 0 ? formatNum(tokOut) : '—') + '</td>' +
           '<td style="padding:10px;text-align:right;font-family:var(--mono);color:var(--text-tertiary)">' + avgLat + '</td>' +
           '<td style="padding:10px;text-align:right;font-family:var(--mono);' + errStyle + '">' + (errs > 0 ? errs : '—') + '</td>' +
-          '<td style="padding:10px;text-align:center"><button class="btn-ghost" onclick="quickTestModel(\'' + escHtml(id) + '\')" style="padding:3px 10px;font-size:12px">Test</button></td>' +
+          '<td style="padding:10px;text-align:center"><button class="btn-ghost quick-test-btn" data-model="' + escHtml(id) + '" style="padding:3px 10px;font-size:12px">Test</button></td>' +
         '</tr>';
       });
 
@@ -2169,8 +2680,11 @@ async function loadModels() {
   }
 }
 
-async function quickTestModel(model) {
-  var btn = event.target;
+async function quickTestModel(model, btnEl) {
+  // D1: btnEl is passed by the delegated click handler; fall back to event.target
+  // for any legacy inline caller (kept for safety, no known callers remain).
+  var btn = btnEl || (typeof event !== 'undefined' && event ? event.target : null);
+  if (!btn) return;
   var origText = btn.textContent;
   btn.textContent = 'Testing...';
   btn.disabled = true;
@@ -2178,7 +2692,10 @@ async function quickTestModel(model) {
   try {
     var r = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authKey },
+      // D3: in cookie-auth mode authKey is '' — sending "Bearer " (empty) makes
+      // the gateway reject with 401. Mirror runTest(): only add the header when
+      // we actually have a key (cookie session provides auth otherwise).
+      headers: { 'Content-Type': 'application/json', ...(authKey ? { 'Authorization': 'Bearer ' + authKey } : {}) },
       body: JSON.stringify({ model: model, messages: [{role:'user',content:'Say OK'}], stream: false })
     });
     var data = await r.json();
@@ -2725,7 +3242,7 @@ async function loadCustomModels() {
   var tbody = document.getElementById('cmTableBody');
   if (!tbody) return;
   try {
-    var res = await api('/api/models/custom');
+    var res = await apiFetch('/api/models/custom');
     var models = res.models || {};
     var ids = Object.keys(models).sort();
     if (ids.length === 0) {
@@ -2739,7 +3256,7 @@ async function loadCustomModels() {
         '<td style="padding:8px;border-bottom:1px solid var(--border)">' + escHtml(m.upstream || '') + '</td>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono)">' + escHtml(m.model_name || '') + '</td>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border)">' + escHtml(m.owned_by || '') + '</td>' +
-        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost" onclick="deleteCustomModel(' + JSON.stringify(id) + ')" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost delete-custom-btn" data-id="' + escHtml(id) + '" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
         '</tr>';
     }).join('');
   } catch (e) {
@@ -2760,7 +3277,7 @@ async function addCustomModel() {
     return;
   }
   try {
-    await api('/api/models/custom', {
+    await apiFetch('/api/models/custom', {
       method: 'POST',
       headers: {'content-type': 'application/json'},
       body: JSON.stringify({id: id, upstream: upstream, model_name: modelName, owned_by: ownedBy})
@@ -2780,7 +3297,7 @@ async function deleteCustomModel(id) {
   try {
     // Path may contain slashes (e.g. cb/kimi-k3) — encode each segment to
     // preserve them; server DELETE /api/models/custom/*id reads the raw path.
-    await api('/api/models/custom/' + id.split('/').map(encodeURIComponent).join('/'), {method: 'DELETE'});
+    await apiFetch('/api/models/custom/' + id.split('/').map(encodeURIComponent).join('/'), {method: 'DELETE'});
     loadCustomModels();
   } catch (e) {
     alert('Delete failed: ' + e.message);
@@ -2791,7 +3308,7 @@ async function loadAliases() {
   var tbody = document.getElementById('alTableBody');
   if (!tbody) return;
   try {
-    var res = await api('/api/aliases');
+    var res = await apiFetch('/api/aliases');
     var aliases = res.aliases || {};
     var names = Object.keys(aliases).sort();
     if (names.length === 0) {
@@ -2802,7 +3319,7 @@ async function loadAliases() {
       return '<tr>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono);color:var(--emerald)">' + escHtml(a) + '</td>' +
         '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono)">' + escHtml(aliases[a]) + '</td>' +
-        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost" onclick="deleteAlias(' + JSON.stringify(a) + ')" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost delete-alias-btn" data-alias="' + escHtml(a) + '" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
         '</tr>';
     }).join('');
   } catch (e) {
@@ -2821,7 +3338,7 @@ async function addAlias() {
     return;
   }
   try {
-    await api('/api/aliases', {
+    await apiFetch('/api/aliases', {
       method: 'POST',
       headers: {'content-type': 'application/json'},
       body: JSON.stringify({alias: alias, target: target})
@@ -2838,10 +3355,376 @@ async function addAlias() {
 async function deleteAlias(alias) {
   if (!confirm('Delete alias "' + alias + '"?')) return;
   try {
-    await api('/api/aliases/' + encodeURIComponent(alias), {method: 'DELETE'});
+    await apiFetch('/api/aliases/' + encodeURIComponent(alias), {method: 'DELETE'});
     loadAliases();
   } catch (e) {
     alert('Delete failed: ' + e.message);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
+   COMBOS (v1.4.0) — group models with fallback / round-robin
+   ══════════════════════════════════════════════════════════ */
+async function loadCombos() {
+  var tbody = document.getElementById('cbxTableBody');
+  if (!tbody) return;
+  try {
+    var res = await apiFetch('/api/combos');
+    var combos = res.combos || [];
+    if (combos.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-tertiary)">No combos yet. Create one above.</td></tr>';
+      return;
+    }
+    combos.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
+    tbody.innerHTML = combos.map(function(c) {
+      var name = c.name || '';
+      var strategy = c.strategy || 'fallback';
+      var models = Array.isArray(c.models) ? c.models : [];
+      var desc = c.description || '';
+      var strategyBadge = strategy === 'round_robin'
+        ? '<span style="padding:2px 8px;border-radius:10px;background:rgba(90,200,120,0.15);color:var(--emerald);font-size:11px">Round Robin</span>'
+        : '<span style="padding:2px 8px;border-radius:10px;background:rgba(100,150,255,0.15);color:var(--brand);font-size:11px">Fallback</span>';
+      var modelsHtml = models.map(function(m) {
+        return '<code style="font-family:var(--mono);font-size:11px;padding:1px 6px;background:var(--bg);border-radius:3px;margin-right:4px;display:inline-block;margin-bottom:2px">' + escHtml(m) + '</code>';
+      }).join('');
+      return '<tr>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border);font-family:var(--mono);color:var(--brand)">combo/' + escHtml(name) + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)">' + strategyBadge + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)">' + modelsHtml + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border);color:var(--text-tertiary)">' + escHtml(desc) + '</td>' +
+        '<td style="padding:8px;border-bottom:1px solid var(--border)"><button class="btn-ghost delete-combo-btn" data-name="' + escHtml(name) + '" style="padding:4px 10px;font-size:11px;color:var(--red)">Delete</button></td>' +
+      '</tr>';
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--red)">Error: ' + escHtml(e.message) + '</td></tr>';
+  }
+}
+
+async function addCombo() {
+  var name = document.getElementById('cbxName').value.trim();
+  var strategy = document.getElementById('cbxStrategy').value;
+  var desc = document.getElementById('cbxDesc').value.trim();
+  var errBox = document.getElementById('cbxError');
+  errBox.style.display = 'none';
+
+  // Get selected models from checkbox selector
+  var models = getSelectedComboModels();
+
+  if (!name) {
+    errBox.textContent = 'Name is required';
+    errBox.style.display = 'block';
+    return;
+  }
+  if (models.length === 0) {
+    errBox.textContent = 'Select at least one model';
+    errBox.style.display = 'block';
+    return;
+  }
+  try {
+    await apiFetch('/api/combos', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({name: name, strategy: strategy, models: models, description: desc})
+    });
+    document.getElementById('cbxName').value = '';
+    document.getElementById('cbxDesc').value = '';
+    // Clear all checkboxes
+    toggleAllComboModels(false);
+    document.getElementById('cbxDesc').value = '';
+    loadCombos();
+  } catch (e) {
+    errBox.textContent = 'Add failed: ' + e.message;
+    errBox.style.display = 'block';
+  }
+}
+
+async function deleteCombo(name) {
+  if (!confirm('Delete combo "' + name + '"?')) return;
+  try {
+    await apiFetch('/api/combos/' + encodeURIComponent(name), {method: 'DELETE'});
+    loadCombos();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
+   PROXY POOL (v1.5.0)
+   ══════════════════════════════════════════════════════════ */
+window._allProxies = [];
+
+async function loadProxies() {
+  try {
+    var d = await fetchJSON('/api/proxies');
+    var list = d.proxies || [];
+    var stats = d.stats || {};
+    window._allProxies = list;
+    document.getElementById('proxyTotal').textContent = stats.total || 0;
+    document.getElementById('proxyEnabled').textContent = stats.enabled || 0;
+    document.getElementById('proxyDisabled').textContent = stats.disabled || 0;
+    document.getElementById('proxyActive').textContent = stats.active || 0;
+    var meta = document.getElementById('proxyPoolMeta');
+    if (meta) meta.textContent = stats.enabled + ' active in round-robin';
+    renderProxies();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    document.getElementById('proxyBody').innerHTML = '<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--red)">Load failed: ' + escHtml(e.message) + '</td></tr>';
+  }
+}
+
+function renderProxies() {
+  var list = window._allProxies || [];
+  var body = document.getElementById('proxyBody');
+  if (!list.length) {
+    body.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text-tertiary)">No proxies configured. Requests use direct connection.</td></tr>';
+    return;
+  }
+  var rows = '';
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i];
+    var status = p.enabled
+      ? '<span class="ok" style="font-size:11px">● enabled</span>'
+      : '<span style="color:var(--text-tertiary);font-size:11px">● disabled</span>';
+    var auth = p.username ? '<span class="mono" style="font-size:11px">' + escHtml(p.username) + ':***</span>' : '<span style="color:var(--text-tertiary)">—</span>';
+    var lastUsed = '—';
+    if (p.last_used_at) {
+      var ts = new Date(p.last_used_at).getTime();
+      if (ts > 0) {
+        var secs = Math.floor((Date.now() - ts) / 1000);
+        if (secs < 60) lastUsed = secs + 's ago';
+        else if (secs < 3600) lastUsed = Math.floor(secs / 60) + 'm ago';
+        else if (secs < 86400) lastUsed = Math.floor(secs / 3600) + 'h ago';
+        else lastUsed = Math.floor(secs / 86400) + 'd ago';
+      }
+    }
+    var failStyle = p.fail_count >= 3 ? 'color:var(--red);font-weight:600' : (p.fail_count > 0 ? 'color:#e6a23c' : '');
+    var upstreams = Array.isArray(p.upstreams) && p.upstreams.length ? p.upstreams : ['all'];
+    var badges = '';
+    for (var j = 0; j < upstreams.length; j++) {
+      var u = upstreams[j];
+      var color = '#7c8590', label = u;
+      if (u === 'all')       { color = 'var(--brand)';  label = 'All'; }
+      else if (u === 'grok') { color = '#4a9eff';       label = 'Grok'; }
+      else if (u === 'codebuddy') { color = '#c084fc';  label = 'CodeBuddy'; }
+      badges += '<span style="display:inline-block;padding:2px 7px;margin-right:4px;font-size:10px;font-weight:500;border-radius:3px;background:' + color + '22;color:' + color + ';border:1px solid ' + color + '55">' + escHtml(label) + '</span>';
+    }
+    rows +=
+      '<tr>' +
+        '<td>' + escHtml(p.label || '(no label)') + '</td>' +
+        '<td class="mono" style="text-transform:uppercase;font-size:11px">' + escHtml(p.protocol) + '</td>' +
+        '<td class="mono">' + escHtml(p.host) + ':' + escHtml(String(p.port)) + '</td>' +
+        '<td>' + auth + '</td>' +
+        '<td>' + badges + '</td>' +
+        '<td>' + status + '</td>' +
+        '<td class="mono" style="' + failStyle + '">' + (p.fail_count || 0) + '</td>' +
+        '<td style="color:var(--text-tertiary);font-size:11px">' + lastUsed + '</td>' +
+        '<td>' +
+          '<button class="btn-ghost test-proxy-btn" data-proxy-id="' + escHtml(p.id) + '" style="padding:3px 8px;font-size:11px;margin-right:4px">Test</button>' +
+          '<button class="btn-ghost toggle-proxy-btn" data-proxy-id="' + escHtml(p.id) + '" style="padding:3px 8px;font-size:11px;margin-right:4px">' + (p.enabled ? 'Disable' : 'Enable') + '</button>' +
+          '<button class="btn-ghost edit-proxy-btn" data-proxy-id="' + escHtml(p.id) + '" style="padding:3px 8px;font-size:11px;margin-right:4px">Edit</button>' +
+          '<button class="btn-ghost delete-proxy-btn" data-proxy-id="' + escHtml(p.id) + '" style="padding:3px 8px;font-size:11px;color:var(--red)">Delete</button>' +
+        '</td>' +
+      '</tr>';
+  }
+  body.innerHTML = rows;
+}
+
+// -------- upstream-checkbox helpers --------
+// Read the selected upstreams for the given modal target ("add" or "edit").
+// Returns e.g. ["all"] or ["grok","codebuddy"]. Always non-empty (falls
+// back to ["all"] if the operator unchecks everything).
+function readUpstreams(target) {
+  var boxes = document.querySelectorAll('.px-upstream[data-target="' + target + '"]');
+  var out = [];
+  for (var i = 0; i < boxes.length; i++) {
+    if (boxes[i].checked) out.push(boxes[i].getAttribute('data-scope'));
+  }
+  if (out.length === 0) out = ['all'];
+  // If "all" was checked with anything else, collapse to ["all"] to match
+  // server-side normalisation.
+  if (out.indexOf('all') !== -1) return ['all'];
+  return out;
+}
+
+// Set checkbox state for the given target from a []string list. Missing/
+// nil list defaults to ["all"].
+function writeUpstreams(target, list) {
+  var arr = (Array.isArray(list) && list.length) ? list : ['all'];
+  var boxes = document.querySelectorAll('.px-upstream[data-target="' + target + '"]');
+  for (var i = 0; i < boxes.length; i++) {
+    var scope = boxes[i].getAttribute('data-scope');
+    boxes[i].checked = arr.indexOf(scope) !== -1;
+  }
+}
+
+// Delegated change handler for upstream checkboxes:
+//   - Checking "All"      → uncheck Grok + CodeBuddy in the same target
+//   - Checking Grok or CB → uncheck "All" in the same target
+//   - Unchecking the last non-All box does NOT re-check "All" (operator
+//     might be mid-edit); readUpstreams falls back to ["all"] on submit.
+document.addEventListener('change', function(ev) {
+  var t = ev.target;
+  if (!(t && t.classList && t.classList.contains('px-upstream'))) return;
+  var target = t.getAttribute('data-target');
+  var scope = t.getAttribute('data-scope');
+  if (!target || !scope) return;
+  if (!t.checked) return; // only enforce exclusivity on check
+  var boxes = document.querySelectorAll('.px-upstream[data-target="' + target + '"]');
+  if (scope === 'all') {
+    for (var i = 0; i < boxes.length; i++) {
+      if (boxes[i].getAttribute('data-scope') !== 'all') boxes[i].checked = false;
+    }
+  } else {
+    for (var j = 0; j < boxes.length; j++) {
+      if (boxes[j].getAttribute('data-scope') === 'all') boxes[j].checked = false;
+    }
+  }
+});
+
+async function addProxy() {
+  var errBox = document.getElementById('pxError');
+  errBox.style.display = 'none';
+  var protocol = document.getElementById('pxProtocol').value;
+  var host = document.getElementById('pxHost').value.trim();
+  var port = parseInt(document.getElementById('pxPort').value, 10);
+  var username = document.getElementById('pxUsername').value.trim();
+  var password = document.getElementById('pxPassword').value;
+  var label = document.getElementById('pxLabel').value.trim();
+  var upstreams = readUpstreams('add');
+  if (!host || !port) {
+    errBox.textContent = 'Host and port are required';
+    errBox.style.display = 'block';
+    return;
+  }
+  try {
+    await apiFetch('/api/proxies', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({protocol: protocol, host: host, port: port, username: username, password: password, label: label, upstreams: upstreams})
+    });
+    document.getElementById('pxHost').value = '';
+    document.getElementById('pxPort').value = '';
+    document.getElementById('pxUsername').value = '';
+    document.getElementById('pxPassword').value = '';
+    document.getElementById('pxLabel').value = '';
+    closeAddProxyModal();
+    loadProxies();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    errBox.textContent = 'Add failed: ' + e.message;
+    errBox.style.display = 'block';
+  }
+}
+
+async function deleteProxy(id) {
+  var entry = (window._allProxies || []).find(function(p){return p.id === id;});
+  var label = entry ? (entry.label || (entry.host + ':' + entry.port)) : id;
+  if (!confirm('Delete proxy "' + label + '"?')) return;
+  try {
+    await apiFetch('/api/proxies/' + encodeURIComponent(id), {method: 'DELETE'});
+    loadProxies();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+async function toggleProxy(id) {
+  try {
+    await apiFetch('/api/proxies/' + encodeURIComponent(id) + '/toggle', {method: 'POST'});
+    loadProxies();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    alert('Toggle failed: ' + e.message);
+  }
+}
+
+async function testProxy(id, btn) {
+  var originalText = btn ? btn.textContent : null;
+  if (btn) { btn.textContent = 'Testing…'; btn.disabled = true; }
+  var box = document.getElementById('proxyTestResult');
+  box.style.display = 'block';
+  box.innerHTML = 'Testing proxy…';
+  try {
+    var r = await apiFetch('/api/proxies/' + encodeURIComponent(id) + '/test', {method: 'POST'});
+    if (r.success) {
+      box.innerHTML = '<span class="ok">✓ OK</span> — egress IP: <span class="mono">' + escHtml(r.ip || '(unknown)') + '</span> · ' + (r.latency_ms || 0) + 'ms';
+    } else {
+      box.innerHTML = '<span class="err">✗ FAILED</span> — ' + escHtml(r.error || 'unknown error') + ' · ' + (r.latency_ms || 0) + 'ms';
+    }
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    box.innerHTML = '<span class="err">✗ Test request failed</span>: ' + escHtml(e.message);
+  } finally {
+    if (btn && originalText !== null) { btn.textContent = originalText; btn.disabled = false; }
+  }
+}
+
+function showEditProxyModal(id) {
+  var entry = (window._allProxies || []).find(function(p){return p.id === id;});
+  if (!entry) { alert('Proxy not found: ' + id); return; }
+  document.getElementById('epxId').value = entry.id;
+  document.getElementById('epxProtocol').value = entry.protocol;
+  document.getElementById('epxHost').value = entry.host || '';
+  document.getElementById('epxPort').value = entry.port || '';
+  document.getElementById('epxUsername').value = entry.username || '';
+  document.getElementById('epxPassword').value = '';
+  document.getElementById('epxLabel').value = entry.label || '';
+  writeUpstreams('edit', entry.upstreams);
+  document.getElementById('epxError').style.display = 'none';
+  document.getElementById('editProxyModal').classList.add('show');
+}
+
+function showAddProxyModal() {
+  document.getElementById('pxProtocol').value = 'http';
+  document.getElementById('pxHost').value = '';
+  document.getElementById('pxPort').value = '';
+  document.getElementById('pxUsername').value = '';
+  document.getElementById('pxPassword').value = '';
+  document.getElementById('pxLabel').value = '';
+  writeUpstreams('add', ['all']);
+  document.getElementById('pxError').style.display = 'none';
+  document.getElementById('addProxyModal').classList.add('show');
+}
+
+function closeAddProxyModal() {
+  document.getElementById('addProxyModal').classList.remove('show');
+}
+
+function closeEditProxyModal() {
+  document.getElementById('editProxyModal').classList.remove('show');
+}
+
+async function saveEditProxy() {
+  var id = document.getElementById('epxId').value;
+  var errBox = document.getElementById('epxError');
+  errBox.style.display = 'none';
+  var protocol = document.getElementById('epxProtocol').value;
+  var host = document.getElementById('epxHost').value.trim();
+  var port = parseInt(document.getElementById('epxPort').value, 10);
+  var username = document.getElementById('epxUsername').value.trim();
+  var passwordRaw = document.getElementById('epxPassword').value;
+  var label = document.getElementById('epxLabel').value.trim();
+  var upstreams = readUpstreams('edit');
+  // Blank password field = keep current (send "***" sentinel).
+  var password = passwordRaw === '' ? '***' : passwordRaw;
+  if (!host || !port) {
+    errBox.textContent = 'Host and port are required';
+    errBox.style.display = 'block';
+    return;
+  }
+  try {
+    await apiFetch('/api/proxies/' + encodeURIComponent(id), {
+      method: 'PUT',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({protocol: protocol, host: host, port: port, username: username, password: password, label: label, upstreams: upstreams})
+    });
+    closeEditProxyModal();
+    loadProxies();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    errBox.textContent = 'Save failed: ' + e.message;
+    errBox.style.display = 'block';
   }
 }
 </script>

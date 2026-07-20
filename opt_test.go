@@ -193,8 +193,8 @@ func TestRateLimitRPMZeroUnlimited(t *testing.T) {
 	am := NewAuthManagerForTest(nil)
 	am.Add("gw-test-unlimited", "test", 0, 0, 0)
 
-	info := am.Get("gw-test-unlimited")
-	if info == nil {
+	info, ok := am.Get("gw-test-unlimited")
+	if !ok {
 		t.Fatal("key not found")
 	}
 	if info.RPM != 0 {

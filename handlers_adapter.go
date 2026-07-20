@@ -9,13 +9,16 @@
 package main
 
 import (
+	"foxrouters/internal/auth"
 	"foxrouters/internal/handlers"
+	"foxrouters/internal/upstream"
+
+	"github.com/gin-gonic/gin"
 )
 
 // Aliases: handler functions keep their old lowercase names in package main.
 var (
 	handleHealthMinimal    = handlers.HandleHealthMinimal
-	handleHealth           = handlers.HandleHealth
 	handleAccounts         = handlers.HandleAccounts
 	handleRefresh          = handlers.HandleRefresh
 	handleImportCBKey      = handlers.HandleImportCBKey
@@ -35,8 +38,6 @@ var (
 	handleUpdateKey        = handlers.HandleUpdateKey
 	handleKeyUsage         = handlers.HandleKeyUsage
 	handleDashboard        = handlers.HandleDashboard
-	handleLogin            = handlers.HandleLogin
-	handleLogout           = handlers.HandleLogout
 	handleMessages         = handlers.HandleMessages
 	anthropicAuthMiddleware = handlers.AnthropicAuthMiddleware
 
@@ -47,4 +48,31 @@ var (
 	handleListAliases       = handlers.HandleListAliases
 	handleAddAlias          = handlers.HandleAddAlias
 	handleDeleteAlias       = handlers.HandleDeleteAlias
+
+	// v1.4.0 — combos
+	handleListCombos  = handlers.HandleListCombos
+	handleGetCombo    = handlers.HandleGetCombo
+	handleAddCombo    = handlers.HandleAddCombo
+	handleDeleteCombo = handlers.HandleDeleteCombo
+
+	// v1.5.0 — proxy pool
+	handleListProxies  = handlers.HandleListProxies
+	handleAddProxy     = handlers.HandleAddProxy
+	handleUpdateProxy  = handlers.HandleUpdateProxy
+	handleDeleteProxy  = handlers.HandleDeleteProxy
+	handleToggleProxy  = handlers.HandleToggleProxy
+	handleTestProxy    = handlers.HandleTestProxy
 )
+
+// Function wrappers for handlers whose signature changed to accept
+// the session store (P3-3). Var aliases don't work because the
+// function type no longer matches the package-main call site.
+func handleHealth(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManager, hc *upstream.HealthChecker, am *auth.Manager, sessions *auth.SessionStore) gin.HandlerFunc {
+	return handlers.HandleHealth(grokAM, cbKM, hc, am, sessions)
+}
+func handleLogin(am *auth.Manager, sessions *auth.SessionStore) gin.HandlerFunc {
+	return handlers.HandleLogin(am, sessions)
+}
+func handleLogout(sessions *auth.SessionStore) gin.HandlerFunc {
+	return handlers.HandleLogout(sessions)
+}
