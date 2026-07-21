@@ -516,6 +516,23 @@ func ProxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			bodyStr := string(bodyBytes)
+			// 403 with code 11140 = "request illegal" (banned/flagged key) → permanent disable
+			if resp.StatusCode == 403 && strings.Contains(bodyStr, "11140") {
+				key.mu.Lock()
+				key.disabled = true
+				key.disabledAt = time.Time{} // permanent — banned by CodeBuddy
+				kKey := key.Key
+				credits := key.creditsUsed
+				reqs := key.totalReqs
+				disabled := key.disabled
+				disabledAt := key.disabledAt
+				key.mu.Unlock()
+				if key.db != nil {
+					saveCBKey(key.db, kKey, credits, reqs, disabled, disabledAt)
+				}
+				slog.Warn("key disabled (403 request illegal, banned, permanent)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
+				continue
+			}
 			if strings.Contains(bodyStr, "14018") || strings.Contains(bodyStr, "Credits exhausted") {
 				key.mu.Lock()
 				key.disabled = true
