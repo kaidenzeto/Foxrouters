@@ -9,18 +9,20 @@
 #
 # What it does:
 #   1. Checks/installs Docker
-#   2. Creates dedicated network + volumes
-#   3. Pulls and starts Redis, ClickHouse, and FoxRouters containers
-#   4. Generates random Redis password + bootstraps gateway admin key
-#   5. Prints gateway key + dashboard URL
+#   2. Prompts for log backend (SQLite default; ClickHouse optional)
+#   3. Creates dedicated network + volumes
+#   4. Pulls and starts Redis (+ ClickHouse if selected) + FoxRouters containers
+#   5. Generates random Redis password + bootstraps gateway admin key
+#   6. Prints gateway key + dashboard URL
+#
+# Non-interactive mode:
+#   Set LOG_BACKEND=sqlite     (default) or LOG_BACKEND=clickhouse before piping to bash.
+#     curl -fsSL … | LOG_BACKEND=clickhouse bash
 #
 # Manage after install:
-#   docker logs foxrouters -f              # tail logs
-#   docker restart foxrouters              # restart gateway
-#   docker stop foxrouters foxrouters-redis foxrouters-clickhouse  # stop all
-#   docker start foxrouters-redis foxrouters-clickhouse foxrouters  # start all
-#   docker rm -f foxrouters foxrouters-redis foxrouters-clickhouse  # remove (keeps volumes)
-#   docker volume rm foxrouters-redis-data foxrouters-clickhouse-data  # wipe data
+#   docker logs foxrouters -f
+#   docker restart foxrouters
+#   docker rm -f foxrouters foxrouters-redis [foxrouters-clickhouse]   # remove (keeps volumes)
 #
 set -euo pipefail
 
@@ -35,6 +37,7 @@ CH_NATIVE_PORT="${CH_NATIVE_PORT:-9000}"
 NETWORK="foxrouters-net"
 VOL_REDIS="foxrouters-redis-data"
 VOL_CH="foxrouters-clickhouse-data"
+VOL_SQLITE="foxrouters-sqlite-data"
 CONFIG_DIR="/etc/foxrouters"
 ENV_FILE="${CONFIG_DIR}/.env"
 KEY_FILE="${CONFIG_DIR}/gateway-key.txt"
@@ -52,7 +55,6 @@ err()    { printf '\033[31m[✗]\033[0m %s\n' "$*"; }
 info "Checking Docker..."
 if ! command -v docker &>/dev/null; then
     yellow "Docker not found. Installing..."
-    # Try official install script
     if command -v curl &>/dev/null; then
         curl -fsSL https://get.docker.com | sh
     elif command -v wget &>/dev/null; then
@@ -62,7 +64,6 @@ if ! command -v docker &>/dev/null; then
         err "Install Docker manually: https://docs.docker.com/engine/install/"
         exit 1
     fi
-    # Start Docker service
     systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true
     systemctl enable docker 2>/dev/null || true
     ok "Docker installed"
@@ -70,18 +71,47 @@ else
     ok "Docker found: $(docker --version)"
 fi
 
-# Verify Docker daemon is running
 if ! docker info &>/dev/null; then
     err "Docker daemon not running. Start it with: systemctl start docker"
     exit 1
 fi
 
-# ── Step 2: Generate secrets ────────────────────────────────────────────────
+# ── Step 2: Prompt for log backend ──────────────────────────────────────────
+# Priority:
+#   1. LOG_BACKEND env var (non-interactive install)
+#   2. Interactive prompt (only if stdin is a TTY)
+#   3. Default: sqlite
+LOG_BACKEND="${LOG_BACKEND:-}"
+if [[ -z "${LOG_BACKEND}" ]]; then
+    if [[ -t 0 ]]; then
+        echo ""
+        bold "Log backend"
+        echo "  [1] SQLite     (default, lightweight, ~0 ops cost — recommended)"
+        echo "  [2] ClickHouse (analytics; adds ~700MB image + a service to maintain)"
+        echo ""
+        read -r -p "Choice [1]: " CHOICE || CHOICE=""
+        case "${CHOICE}" in
+            2|ch|clickhouse) LOG_BACKEND="clickhouse" ;;
+            *)               LOG_BACKEND="sqlite"     ;;
+        esac
+    else
+        # Piped install with no LOG_BACKEND set → default to sqlite.
+        LOG_BACKEND="sqlite"
+    fi
+fi
+case "${LOG_BACKEND}" in
+    sqlite|clickhouse) ok "Log backend: ${LOG_BACKEND}" ;;
+    *)
+        err "Unknown LOG_BACKEND=${LOG_BACKEND} — must be sqlite or clickhouse"
+        exit 1
+        ;;
+esac
+
+# ── Step 3: Generate secrets ────────────────────────────────────────────────
 info "Generating secrets..."
 REDIS_PASSWORD=$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | xxd -p)
 CH_PASSWORD=""  # ClickHouse default user has no password by default
 
-# Create config directory
 mkdir -p "${CONFIG_DIR}"
 chmod 700 "${CONFIG_DIR}"
 
@@ -92,6 +122,8 @@ cat > "${ENV_FILE}" << EOF
 REDIS_ADDR=redis:6379
 REDIS_PASSWORD=${REDIS_PASSWORD}
 REDIS_DB=0
+LOG_BACKEND=${LOG_BACKEND}
+LOG_SQLITE_PATH=/var/lib/foxrouters/logs.db
 CLICKHOUSE_ADDR=clickhouse:9000
 CLICKHOUSE_DB=gateway
 CLICKHOUSE_USER=default
@@ -102,20 +134,25 @@ EOF
 chmod 600 "${ENV_FILE}"
 ok "Secrets generated → ${ENV_FILE}"
 
-# ── Step 3: Create network + volumes ─────────────────────────────────────────
+# ── Step 4: Create network + volumes ─────────────────────────────────────────
 info "Creating Docker network + volumes..."
-docker network create "${NETWORK}" 2>/dev/null || ok "Network ${NETWORK} already exists"
-docker volume create "${VOL_REDIS}" 2>/dev/null || ok "Volume ${VOL_REDIS} already exists"
-docker volume create "${VOL_CH}" 2>/dev/null || ok "Volume ${VOL_CH} already exists"
+docker network create "${NETWORK}"    2>/dev/null || ok "Network ${NETWORK} already exists"
+docker volume  create "${VOL_REDIS}"  2>/dev/null || ok "Volume ${VOL_REDIS} already exists"
+docker volume  create "${VOL_SQLITE}" 2>/dev/null || ok "Volume ${VOL_SQLITE} already exists"
+if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+    docker volume create "${VOL_CH}" 2>/dev/null || ok "Volume ${VOL_CH} already exists"
+fi
 
-# ── Step 4: Pull images ─────────────────────────────────────────────────────
+# ── Step 5: Pull images ─────────────────────────────────────────────────────
 info "Pulling images (this may take a few minutes on first run)..."
-docker pull "${IMAGE_REDIS}"        2>&1 | tail -1
-docker pull "${IMAGE_CLICKHOUSE}"   2>&1 | tail -1
-docker pull "${IMAGE_GATEWAY}"      2>&1 | tail -1
+docker pull "${IMAGE_REDIS}"      2>&1 | tail -1
+if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+    docker pull "${IMAGE_CLICKHOUSE}" 2>&1 | tail -1
+fi
+docker pull "${IMAGE_GATEWAY}"    2>&1 | tail -1
 ok "Images pulled"
 
-# ── Step 5: Start Redis ─────────────────────────────────────────────────────
+# ── Step 6: Start Redis ─────────────────────────────────────────────────────
 info "Starting Redis..."
 docker rm -f foxrouters-redis 2>/dev/null || true
 docker run -d \
@@ -129,65 +166,75 @@ docker run -d \
     redis-server --requirepass "${REDIS_PASSWORD}" --appendonly no
 ok "Redis started (port ${REDIS_PORT})"
 
-# ── Step 6: Start ClickHouse ────────────────────────────────────────────────
-info "Starting ClickHouse..."
-docker rm -f foxrouters-clickhouse 2>/dev/null || true
-docker run -d \
-    --name foxrouters-clickhouse \
-    --network "${NETWORK}" \
-    --network-alias clickhouse \
-    -p "127.0.0.1:${CH_HTTP_PORT}:8123" \
-    -p "127.0.0.1:${CH_NATIVE_PORT}:9000" \
-    -v "${VOL_CH}:/var/lib/clickhouse" \
-    --ulimit nofile=262144:262144 \
-    --restart unless-stopped \
-    -e CLICKHOUSE_USER=default \
-    -e CLICKHOUSE_PASSWORD="${CH_PASSWORD}" \
-    -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
-    "${IMAGE_CLICKHOUSE}"
-ok "ClickHouse started (HTTP ${CH_HTTP_PORT}, Native ${CH_NATIVE_PORT})"
+# ── Step 7: Start ClickHouse (only if selected) ─────────────────────────────
+if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+    info "Starting ClickHouse..."
+    docker rm -f foxrouters-clickhouse 2>/dev/null || true
+    docker run -d \
+        --name foxrouters-clickhouse \
+        --network "${NETWORK}" \
+        --network-alias clickhouse \
+        -p "127.0.0.1:${CH_HTTP_PORT}:8123" \
+        -p "127.0.0.1:${CH_NATIVE_PORT}:9000" \
+        -v "${VOL_CH}:/var/lib/clickhouse" \
+        --ulimit nofile=262144:262144 \
+        --restart unless-stopped \
+        -e CLICKHOUSE_USER=default \
+        -e CLICKHOUSE_PASSWORD="${CH_PASSWORD}" \
+        -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+        "${IMAGE_CLICKHOUSE}"
+    ok "ClickHouse started (HTTP ${CH_HTTP_PORT}, Native ${CH_NATIVE_PORT})"
+else
+    info "SQLite mode — skipping ClickHouse container"
+    # Best-effort cleanup of a stale CH container from a prior CH install.
+    docker rm -f foxrouters-clickhouse 2>/dev/null || true
+fi
 
-# ── Step 7: Wait for Redis + CH healthy ─────────────────────────────────────
-info "Waiting for Redis + ClickHouse to be healthy..."
+# ── Step 8: Wait for dependencies healthy ───────────────────────────────────
+info "Waiting for Redis${LOG_BACKEND:+ + ${LOG_BACKEND}} to be healthy..."
 for i in $(seq 1 30); do
     REDIS_OK=$(docker exec foxrouters-redis redis-cli -a "${REDIS_PASSWORD}" ping 2>/dev/null || echo "FAIL")
-    CH_OK=$(curl -sf "http://127.0.0.1:${CH_HTTP_PORT}/ping" 2>/dev/null || echo "FAIL")
+    if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+        CH_OK=$(curl -sf "http://127.0.0.1:${CH_HTTP_PORT}/ping" 2>/dev/null || echo "FAIL")
+    else
+        CH_OK="Ok."
+    fi
     if [[ "${REDIS_OK}" == "PONG" && "${CH_OK}" == "Ok." ]]; then
-        ok "Redis + ClickHouse healthy"
+        ok "Dependencies healthy"
         break
     fi
     printf "."
     sleep 2
     if [[ $i -eq 30 ]]; then
-        err "Timeout waiting for Redis + ClickHouse"
+        err "Timeout waiting for dependencies"
         docker logs foxrouters-redis --tail 5
-        docker logs foxrouters-clickhouse --tail 5
+        [[ "${LOG_BACKEND}" == "clickhouse" ]] && docker logs foxrouters-clickhouse --tail 5
         exit 1
     fi
 done
 
-# ── Step 8: Start FoxRouters gateway ────────────────────────────────────────
+# ── Step 9: Start FoxRouters gateway ────────────────────────────────────────
 info "Starting FoxRouters gateway..."
 docker rm -f foxrouters 2>/dev/null || true
 docker run -d \
     --name foxrouters \
     --network "${NETWORK}" \
     -p "127.0.0.1:${GATEWAY_PORT}:20130" \
+    -v "${VOL_SQLITE}:/var/lib/foxrouters" \
     --restart unless-stopped \
     --env-file "${ENV_FILE}" \
     -e REDIS_ADDR=redis:6379 \
+    -e LOG_BACKEND="${LOG_BACKEND}" \
+    -e LOG_SQLITE_PATH=/var/lib/foxrouters/logs.db \
     -e CLICKHOUSE_ADDR=clickhouse:9000 \
     -e CLICKHOUSE_DB=gateway \
     -e CLICKHOUSE_USER=default \
     -e CLICKHOUSE_PASSWORD="${CH_PASSWORD}" \
     -e PORT=20130 \
     "${IMAGE_GATEWAY}"
-ok "FoxRouters started (port ${GATEWAY_PORT})"
+ok "FoxRouters started (port ${GATEWAY_PORT}, log backend: ${LOG_BACKEND})"
 
-# ── Step 9: Capture gateway key from Redis ──────────────────────────────────
-# Redis is the single source of truth. Gateway writes the bootstrap key to
-# Redis on first boot, or loads existing keys on re-deploy. Either way,
-# the full (unmasked) key is in HASH gw:key:* field "key".
+# ── Step 10: Capture gateway key from Redis ─────────────────────────────────
 info "Waiting for gateway to write key to Redis (up to 30s)..."
 BOOTSTRAP_KEY=""
 for i in $(seq 1 30); do
@@ -212,7 +259,7 @@ echo "${BOOTSTRAP_KEY}" > "${KEY_FILE}"
 chmod 600 "${KEY_FILE}"
 ok "Gateway key captured → ${KEY_FILE}"
 
-# ── Step 10: Health check ───────────────────────────────────────────────────
+# ── Step 11: Health check ───────────────────────────────────────────────────
 info "Health check..."
 sleep 3
 HEALTH=$(curl -sf "http://127.0.0.1:${GATEWAY_PORT}/health" 2>/dev/null || echo "FAIL")
@@ -239,14 +286,21 @@ fi
 echo "  Dashboard:    http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost'):${GATEWAY_PORT}/dashboard"
 echo "  API Base:     http://localhost:${GATEWAY_PORT}/v1/chat/completions"
 echo "  Health:       http://localhost:${GATEWAY_PORT}/health"
+echo "  Log backend:  ${LOG_BACKEND}"
 echo ""
 echo "  Config:       ${ENV_FILE}"
 echo ""
 echo "  Manage:"
 echo "    docker logs foxrouters -f           # tail logs"
 echo "    docker restart foxrouters           # restart gateway"
-echo "    docker stop foxrouters-redis foxrouters-clickhouse foxrouters  # stop all"
-echo "    docker start foxrouters-redis foxrouters-clickhouse foxrouters  # start all"
-echo "    docker rm -f foxrouters foxrouters-redis foxrouters-clickhouse  # remove (keeps data)"
+if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+    echo "    docker stop foxrouters-redis foxrouters-clickhouse foxrouters"
+    echo "    docker start foxrouters-redis foxrouters-clickhouse foxrouters"
+    echo "    docker rm -f foxrouters foxrouters-redis foxrouters-clickhouse"
+else
+    echo "    docker stop foxrouters-redis foxrouters"
+    echo "    docker start foxrouters-redis foxrouters"
+    echo "    docker rm -f foxrouters foxrouters-redis"
+fi
 echo ""
 bold "═══════════════════════════════════════════════════════════════"

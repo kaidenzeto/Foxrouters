@@ -29,8 +29,15 @@ Client → AuthMiddleware (Bearer) → RateLimitMiddleware
 | Layer | Engine | Purpose |
 |-------|--------|---------|
 | Hot | **Redis** | Tokens, CB credits, disabled flags, gateway keys, rate state, **proxy pool** |
-| Cold | **ClickHouse** (`127.0.0.1:9000`) | `request_logs` full request/response JSON, refresh/events, 90d TTL |
+| Cold | **LogStore** (pluggable via `LOG_BACKEND`) | `request_logs` full request/response JSON, refresh/events, 90d TTL |
 | Legacy | PostgreSQL | **Not used** by gateway for history (may remain on disk) |
+
+Log backend choices (`LOG_BACKEND` env, default `sqlite`):
+
+| Backend | When to use | Footprint |
+|---------|-------------|-----------|
+| `sqlite` (default) | Small deployments; no ops overhead | Single file at `LOG_SQLITE_PATH` (default `/var/lib/foxrouters/logs.db`), ~60MB total |
+| `clickhouse`       | Analytics workloads, high-volume queries | Separate CH server, ~700MB image + RAM |
 
 ### Hot-path rules (do not regress)
 1. `Next()` = O(k) RR only — re-enable in background workers only  
@@ -61,7 +68,10 @@ Client → AuthMiddleware (Bearer) → RateLimitMiddleware
 | `grok_account.go` | Grok pool, refresh, proxyGrok, reenableWorker |
 | `codebuddy.go` | CB pool, transform, proxyCodeBuddy, reenableCBWorker |
 | `proxy.go` | Routing, RequestLog build |
-| `db.go` | Redis + ClickHouse |
+| `db.go` | Redis + LogStore glue (async batch pipeline, factory) |
+| `internal/db/logstore.go` | `LogStore` interface + shared DTOs (RequestLog, RequestStats, …) |
+| `internal/db/logstore_sqlite.go` | modernc.org/sqlite backend (default) |
+| `internal/db/logstore_clickhouse.go` | ClickHouse backend (opt-in via `LOG_BACKEND=clickhouse`) |
 | `handlers.go` | health, accounts, history, keys, dashboard static |
 | `auth.go` / `ratelimit.go` / `health.go` | Auth, RPM, circuit |
 | `dashboard.html` | SPA — 5 nav routes (Dashboard/Accounts/Keys/Models/Proxies), Models page has 3 tabs (Models/Custom/Combos) |
@@ -79,7 +89,9 @@ Client → AuthMiddleware (Bearer) → RateLimitMiddleware
 ## Env (essentials)
 ```
 REDIS_ADDR / REDIS_PASSWORD / REDIS_DB
-CLICKHOUSE_ADDR=127.0.0.1:9000
+LOG_BACKEND=sqlite               # sqlite (default) | clickhouse
+LOG_SQLITE_PATH=/var/lib/foxrouters/logs.db  # only used when LOG_BACKEND=sqlite
+CLICKHOUSE_ADDR=127.0.0.1:9000   # only used when LOG_BACKEND=clickhouse
 CLICKHOUSE_DB=gateway
 GATEWAY_KEY_FILE / CB_KEY_FILE
 PORT=20130

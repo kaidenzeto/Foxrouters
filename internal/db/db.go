@@ -13,20 +13,15 @@ package db
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -98,14 +93,36 @@ func clickhouseAddr() string { return envOr("CLICKHOUSE_ADDR", "127.0.0.1:9000")
 
 func clickhouseDatabase() string { return envOr("CLICKHOUSE_DB", "gateway") }
 
+// NewLogStore selects the log backend based on LOG_BACKEND:
+//
+//	LOG_BACKEND=sqlite      (default) → local file DB via modernc.org/sqlite
+//	LOG_BACKEND=clickhouse            → external ClickHouse (opt-in)
+//
+// Unknown values fall through to sqlite so a typo can't take the gateway
+// down. Exposed at package scope so tests can substitute a fake LogStore.
+func NewLogStore() (LogStore, error) {
+	backend := strings.ToLower(strings.TrimSpace(envOr("LOG_BACKEND", "sqlite")))
+	switch backend {
+	case "clickhouse", "ch":
+		return newClickhouseStore()
+	case "sqlite", "sqlite3", "":
+		return newSqliteStore()
+	default:
+		slog.Warn("unknown LOG_BACKEND, defaulting to sqlite", "module", "db", "value", backend)
+		return newSqliteStore()
+	}
+}
+
 // ============================================================================
 // STORE
 // ============================================================================
 
-// Store is the unified Redis + ClickHouse manager.
+// Store is the unified Redis + LogStore manager. It owns the async batching
+// pipeline that feeds any LogStore backend (ClickHouse or SQLite) without
+// blocking the request path.
 type Store struct {
-	rdb *redis.Client
-	ch  driver.Conn
+	rdb      *redis.Client
+	logStore LogStore
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -113,42 +130,6 @@ type Store struct {
 	reqLogCh  chan RequestLog
 	refreshCh chan RefreshLog
 	eventCh   chan AccountEvent
-}
-
-// RequestLog is a single row for the ClickHouse request_logs table.
-type RequestLog struct {
-	Timestamp    time.Time
-	RequestID    string
-	ClientKey    string
-	Model        string
-	Upstream     string
-	AccountID    string
-	StatusCode   int
-	LatencyMs    int
-	TokensIn     int
-	TokensOut    int
-	ErrorMsg     string
-	InputText    string          // quick preview (last user msg, 500 chars)
-	OutputText   string          // quick preview (first 1000 chars)
-	RequestBody  json.RawMessage // full request JSON
-	ResponseBody json.RawMessage // full response JSON
-}
-
-type RefreshLog struct {
-	Timestamp    time.Time
-	AccountEmail string
-	Provider     string
-	Success      bool
-	ErrorMsg     string
-	LatencyMs    int
-}
-
-type AccountEvent struct {
-	Timestamp time.Time
-	AccountID string
-	Provider  string
-	EventType string
-	EventData map[string]interface{}
 }
 
 // ============================================================================
@@ -194,8 +175,8 @@ type CBKeyDTO struct {
 	DisabledAt   time.Time
 }
 
-// NewStore initializes Redis + ClickHouse, ensures schema, and spawns the
-// async log consumers. Call Close() to flush + tear down.
+// NewStore initializes Redis + the selected LogStore backend, ensures schema,
+// and spawns the async log consumers. Call Close() to flush + tear down.
 func NewStore() (*Store, error) {
 	rAddr, rPass, rDB := redisConfig()
 	rdb := redis.NewClient(&redis.Options{
@@ -215,140 +196,35 @@ func NewStore() (*Store, error) {
 		return nil, fmt.Errorf("redis ping: %w", err)
 	}
 
-	chAddr := clickhouseAddr()
-	chDB := clickhouseDatabase()
-	chUser := envOr("CLICKHOUSE_USER", "default")
-	chPass := envOr("CLICKHOUSE_PASSWORD", "")
-
-	// Connect to 'default' database first to ensure target DB exists.
-	bootstrapCh, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{chAddr},
-		Auth: clickhouse.Auth{
-			Database: "default",
-			Username: chUser,
-			Password: chPass,
-		},
-		DialTimeout: 5 * time.Second,
-	})
+	logStore, err := NewLogStore()
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse open (bootstrap): %w", err)
-	}
-	if len(chDB) == 0 || !regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`).MatchString(chDB) {
-		return nil, fmt.Errorf("invalid CLICKHOUSE_DB name %q: must be alphanumeric/underscore, start with letter", chDB)
-	}
-	if err := bootstrapCh.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", chDB)); err != nil {
-		return nil, fmt.Errorf("clickhouse create database: %w", err)
-	}
-	bootstrapCh.Close()
-
-	ch, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{chAddr},
-		Auth: clickhouse.Auth{
-			Database: chDB,
-			Username: chUser,
-			Password: chPass,
-		},
-		DialTimeout:  5 * time.Second,
-		MaxOpenConns: 10,
-		MaxIdleConns: 5,
-		Compression: &clickhouse.Compression{
-			Method: clickhouse.CompressionLZ4,
-		},
-		Settings: clickhouse.Settings{
-			"async_insert":          1,
-			"wait_for_async_insert": 0,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse open: %w", err)
-	}
-	if err := ch.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("clickhouse ping: %w", err)
+		return nil, fmt.Errorf("log store init: %w", err)
 	}
 
 	s := &Store{
 		rdb:       rdb,
-		ch:        ch,
+		logStore:  logStore,
 		done:      make(chan struct{}),
 		reqLogCh:  make(chan RequestLog, LOG_BUFFER_SIZE),
 		refreshCh: make(chan RefreshLog, LOG_BUFFER_SIZE),
 		eventCh:   make(chan AccountEvent, LOG_BUFFER_SIZE),
 	}
 
-	if err := s.ensureClickHouseSchema(ctx); err != nil {
-		slog.Warn("ensure schema failed", "module", "db-ch", "error", err)
+	// EnsureSchema uses a fresh ctx (30s) because SQLite may take a moment
+	// on first-run PRAGMA setup with WAL journal creation.
+	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := s.logStore.EnsureSchema(schemaCtx); err != nil {
+		slog.Warn("ensure schema failed", "module", "db-log", "backend", s.logStore.Kind(), "error", err)
 	}
+	schemaCancel()
 
 	s.wg.Add(3)
 	go s.consumeRequestLogs()
 	go s.consumeRefreshLogs()
 	go s.consumeAccountEvents()
 
-	slog.Info("Redis + ClickHouse connected", "module", "db", "redis", rAddr, "ch_addr", chAddr, "ch_db", chDB)
+	slog.Info("Redis + log store connected", "module", "db", "redis", rAddr, "log_backend", s.logStore.Kind())
 	return s, nil
-}
-
-func (s *Store) ensureClickHouseSchema(ctx context.Context) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS request_logs (
-			id UInt64,
-			timestamp DateTime64(3, 'UTC'),
-			request_id String,
-			client_key LowCardinality(String),
-			model LowCardinality(String),
-			upstream LowCardinality(String),
-			account_id String,
-			status_code UInt16,
-			latency_ms UInt32,
-			tokens_in UInt32,
-			tokens_out UInt32,
-			error_msg String,
-			input_text String,
-			output_text String,
-			request_body String CODEC(ZSTD(3)),
-			response_body String CODEC(ZSTD(3))
-		) ENGINE = MergeTree
-		PARTITION BY toYYYYMMDD(timestamp)
-		ORDER BY (timestamp, id)
-		TTL toDateTime(timestamp) + INTERVAL 90 DAY
-		SETTINGS index_granularity = 8192`,
-		`ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS request_id String AFTER timestamp`,
-		`CREATE TABLE IF NOT EXISTS token_refresh_history (
-			timestamp DateTime64(3, 'UTC'),
-			account_email String,
-			provider LowCardinality(String),
-			success UInt8,
-			error_msg String,
-			latency_ms UInt32
-		) ENGINE = MergeTree
-		PARTITION BY toYYYYMM(timestamp)
-		ORDER BY (timestamp, account_email)
-		TTL toDateTime(timestamp) + INTERVAL 90 DAY`,
-		`CREATE TABLE IF NOT EXISTS account_events (
-			timestamp DateTime64(3, 'UTC'),
-			account_id String,
-			provider LowCardinality(String),
-			event_type LowCardinality(String),
-			event_data String CODEC(ZSTD(3))
-		) ENGINE = MergeTree
-		PARTITION BY toYYYYMM(timestamp)
-		ORDER BY (timestamp, provider, event_type)
-		TTL toDateTime(timestamp) + INTERVAL 90 DAY`,
-	}
-	for _, q := range stmts {
-		if err := s.ch.Exec(ctx, q); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func newLogID() uint64 {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return uint64(time.Now().UnixNano())
-	}
-	return binary.LittleEndian.Uint64(b[:])
 }
 
 // Ready returns true if the store's Redis connection is initialized.
@@ -664,13 +540,6 @@ func (s *Store) LogEvent(e AccountEvent) {
 	}
 }
 
-func bodyString(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	return string(raw)
-}
-
 func (s *Store) consumeRequestLogs() {
 	defer s.wg.Done()
 	batch := make([]RequestLog, 0, 200)
@@ -678,50 +547,14 @@ func (s *Store) consumeRequestLogs() {
 	defer ticker.Stop()
 
 	flush := func() {
-		if len(batch) == 0 || s.ch == nil {
+		if len(batch) == 0 || s.logStore == nil {
 			batch = batch[:0]
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		batchSQL, err := s.ch.PrepareBatch(ctx, `INSERT INTO request_logs (
-			id, timestamp, request_id, client_key, model, upstream, account_id,
-			status_code, latency_ms, tokens_in, tokens_out, error_msg,
-			input_text, output_text, request_body, response_body
-		)`)
-		if err != nil {
-			slog.Error("reqlog prepare", "module", "db-ch", "error", err)
-			batch = batch[:0]
-			return
-		}
-		for _, r := range batch {
-			ts := r.Timestamp.UTC()
-			if ts.IsZero() {
-				ts = time.Now().UTC()
-			}
-			if err := batchSQL.Append(
-				newLogID(),
-				ts,
-				r.RequestID,
-				r.ClientKey,
-				r.Model,
-				r.Upstream,
-				r.AccountID,
-				uint16(r.StatusCode),
-				uint32(max0(r.LatencyMs)),
-				uint32(max0(r.TokensIn)),
-				uint32(max0(r.TokensOut)),
-				r.ErrorMsg,
-				r.InputText,
-				r.OutputText,
-				bodyString(r.RequestBody),
-				bodyString(r.ResponseBody),
-			); err != nil {
-				slog.Error("reqlog append", "module", "db-ch", "error", err)
-			}
-		}
-		if err := batchSQL.Send(); err != nil {
-			slog.Error("reqlog send", "module", "db-ch", "error", err)
+		if err := s.logStore.InsertRequestBatch(ctx, batch); err != nil {
+			slog.Error("reqlog flush", "module", "db-log", "backend", s.logStore.Kind(), "error", err)
 		}
 		batch = batch[:0]
 	}
@@ -742,13 +575,6 @@ func (s *Store) consumeRequestLogs() {
 	}
 }
 
-func max0(n int) int {
-	if n < 0 {
-		return 0
-	}
-	return n
-}
-
 func (s *Store) consumeRefreshLogs() {
 	defer s.wg.Done()
 	batch := make([]RefreshLog, 0, 50)
@@ -756,28 +582,15 @@ func (s *Store) consumeRefreshLogs() {
 	defer ticker.Stop()
 
 	flush := func() {
-		if len(batch) == 0 || s.ch == nil {
+		if len(batch) == 0 || s.logStore == nil {
 			batch = batch[:0]
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		b, err := s.ch.PrepareBatch(ctx, `INSERT INTO token_refresh_history (
-			timestamp, account_email, provider, success, error_msg, latency_ms
-		)`)
-		if err != nil {
-			batch = batch[:0]
-			return
+		if err := s.logStore.InsertRefreshBatch(ctx, batch); err != nil {
+			slog.Debug("refresh flush", "module", "db-log", "error", err)
 		}
-		for _, r := range batch {
-			suc := uint8(0)
-			if r.Success {
-				suc = 1
-			}
-			ts := r.Timestamp.UTC()
-			_ = b.Append(ts, r.AccountEmail, r.Provider, suc, r.ErrorMsg, uint32(max0(r.LatencyMs)))
-		}
-		_ = b.Send()
 		batch = batch[:0]
 	}
 
@@ -804,28 +617,15 @@ func (s *Store) consumeAccountEvents() {
 	defer ticker.Stop()
 
 	flush := func() {
-		if len(batch) == 0 || s.ch == nil {
+		if len(batch) == 0 || s.logStore == nil {
 			batch = batch[:0]
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		b, err := s.ch.PrepareBatch(ctx, `INSERT INTO account_events (
-			timestamp, account_id, provider, event_type, event_data
-		)`)
-		if err != nil {
-			batch = batch[:0]
-			return
+		if err := s.logStore.InsertEventBatch(ctx, batch); err != nil {
+			slog.Debug("event flush", "module", "db-log", "error", err)
 		}
-		for _, e := range batch {
-			var data string
-			if e.EventData != nil {
-				raw, _ := json.Marshal(e.EventData)
-				data = string(raw)
-			}
-			_ = b.Append(e.Timestamp.UTC(), e.AccountID, e.Provider, e.EventType, data)
-		}
-		_ = b.Send()
 		batch = batch[:0]
 	}
 
@@ -846,237 +646,49 @@ func (s *Store) consumeAccountEvents() {
 }
 
 // ============================================================================
-// CLICKHOUSE — history queries (dashboard / analytics)
+// HISTORY QUERIES — thin wrappers that forward to the LogStore backend
 // ============================================================================
 
-type RequestStats struct {
-	TotalRequests  int     `json:"total_requests"`
-	TotalErrors    int     `json:"total_errors"`
-	ErrorRate      float64 `json:"error_rate_pct"`
-	AvgLatencyMs   float64 `json:"avg_latency_ms"`
-	TotalTokensIn  int     `json:"total_tokens_in"`
-	TotalTokensOut int     `json:"total_tokens_out"`
-	TotalTokens    int     `json:"total_tokens"`
-}
-
+// GetRequestStats returns aggregate stats since the given time.
+// Backward-compatible signature — the old *db.Store method name is preserved
+// so handlers don't need to change.
 func (s *Store) GetRequestStats(since time.Time) (*RequestStats, error) {
-	if s == nil || s.ch == nil {
+	if s == nil || s.logStore == nil {
 		return &RequestStats{}, nil
 	}
-	stats := &RequestStats{}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	row := s.ch.QueryRow(ctx, `
-		SELECT
-			count(),
-			countIf(status_code >= 400),
-			ifNull(avg(latency_ms), 0),
-			ifNull(sum(tokens_in), 0),
-			ifNull(sum(tokens_out), 0)
-		FROM request_logs
-		WHERE timestamp >= ?
-	`, since.UTC())
-	var total, errors uint64
-	var avg float64
-	var tin, tout uint64
-	if err := row.Scan(&total, &errors, &avg, &tin, &tout); err != nil {
-		return nil, err
-	}
-	stats.TotalRequests = int(total)
-	stats.TotalErrors = int(errors)
-	stats.AvgLatencyMs = avg
-	stats.TotalTokensIn = int(tin)
-	stats.TotalTokensOut = int(tout)
-	stats.TotalTokens = int(tin + tout)
-	if stats.TotalRequests > 0 {
-		stats.ErrorRate = float64(stats.TotalErrors) / float64(stats.TotalRequests) * 100
-	}
-	return stats, nil
+	return s.logStore.GetRequestStats(ctx, since)
 }
 
-type ModelStats struct {
-	Model          string  `json:"model"`
-	TotalRequests  int     `json:"total_requests"`
-	TotalErrors    int     `json:"total_errors"`
-	AvgLatencyMs   float64 `json:"avg_latency_ms"`
-	TotalTokensIn  int     `json:"total_tokens_in"`
-	TotalTokensOut int     `json:"total_tokens_out"`
-	TotalTokens    int     `json:"total_tokens"`
-}
-
+// GetModelStats returns per-model breakdown of GetRequestStats.
 func (s *Store) GetModelStats(since time.Time, limit int) ([]ModelStats, error) {
-	if s == nil || s.ch == nil {
+	if s == nil || s.logStore == nil {
 		return []ModelStats{}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rows, err := s.ch.Query(ctx, `
-		SELECT
-			model,
-			count() AS total_requests,
-			countIf(status_code >= 400) AS total_errors,
-			ifNull(avg(latency_ms), 0) AS avg_latency,
-			ifNull(sum(tokens_in), 0) AS tokens_in,
-			ifNull(sum(tokens_out), 0) AS tokens_out
-		FROM request_logs
-		WHERE timestamp >= ?
-		GROUP BY model
-		ORDER BY total_requests DESC
-		LIMIT ?
-	`, since.UTC(), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var results []ModelStats
-	for rows.Next() {
-		var m ModelStats
-		var tr, te, tin, tout uint64
-		var avg float64
-		if err := rows.Scan(&m.Model, &tr, &te, &avg, &tin, &tout); err != nil {
-			continue
-		}
-		m.TotalRequests = int(tr)
-		m.TotalErrors = int(te)
-		m.AvgLatencyMs = avg
-		m.TotalTokensIn = int(tin)
-		m.TotalTokensOut = int(tout)
-		m.TotalTokens = int(tin + tout)
-		results = append(results, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("model stats iteration: %w", err)
-	}
-	return results, nil
+	return s.logStore.GetModelStats(ctx, since, limit)
 }
 
-// GetRecentRequests returns latest request logs for dashboard table.
-// ID is a decimal string so JavaScript JSON.parse does not lose UInt64 precision
-// (Number.MAX_SAFE_INTEGER is only 2^53-1; our random UInt64 ids exceed that).
-type RecentRequest struct {
-	ID         string `json:"id"`
-	Timestamp  string `json:"timestamp"`
-	ClientKey  string `json:"client_key"`
-	Model      string `json:"model"`
-	Upstream   string `json:"upstream"`
-	AccountID  string `json:"account_id"`
-	StatusCode int    `json:"status_code"`
-	LatencyMs  int    `json:"latency_ms"`
-	TokensIn   int    `json:"tokens_in"`
-	TokensOut  int    `json:"tokens_out"`
-	InputText  string `json:"input_text,omitempty"`
-	OutputText string `json:"output_text,omitempty"`
-	ErrorMsg   string `json:"error_msg,omitempty"`
-}
-
+// GetRecentRequests returns latest request log previews (dashboard table).
 func (s *Store) GetRecentRequests(limit int) ([]RecentRequest, error) {
-	if s == nil || s.ch == nil {
+	if s == nil || s.logStore == nil {
 		return []RecentRequest{}, nil
-	}
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 500 {
-		limit = 500
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rows, err := s.ch.Query(ctx, `
-		SELECT id, timestamp, client_key, model, upstream, account_id,
-		       status_code, latency_ms, tokens_in, tokens_out, error_msg,
-		       input_text, output_text
-		FROM request_logs
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]RecentRequest, 0, limit)
-	for rows.Next() {
-		var r RecentRequest
-		var id uint64
-		var ts time.Time
-		var sc uint16
-		var lat, tin, tout uint32
-		if err := rows.Scan(&id, &ts, &r.ClientKey, &r.Model, &r.Upstream,
-			&r.AccountID, &sc, &lat, &tin, &tout, &r.ErrorMsg,
-			&r.InputText, &r.OutputText); err != nil {
-			slog.Error("recent scan", "module", "db-ch", "error", err)
-			continue
-		}
-		r.ID = strconv.FormatUint(id, 10)
-		r.StatusCode = int(sc)
-		r.LatencyMs = int(lat)
-		r.TokensIn = int(tin)
-		r.TokensOut = int(tout)
-		r.Timestamp = ts.UTC().Format("2006-01-02 15:04:05")
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		slog.Error("recent requests iteration", "module", "db-ch", "error", err)
-	}
-	return out, nil
+	return s.logStore.GetRecentRequests(ctx, limit)
 }
 
-// RequestDetail is a single request log with full JSON bodies.
-type RequestDetail struct {
-	ID           string          `json:"id"`
-	Timestamp    string          `json:"timestamp"`
-	ClientKey    string          `json:"client_key"`
-	Model        string          `json:"model"`
-	Upstream     string          `json:"upstream"`
-	AccountID    string          `json:"account_id"`
-	StatusCode   int             `json:"status_code"`
-	LatencyMs    int             `json:"latency_ms"`
-	TokensIn     int             `json:"tokens_in"`
-	TokensOut    int             `json:"tokens_out"`
-	ErrorMsg     string          `json:"error_msg"`
-	InputText    string          `json:"input_text"`
-	OutputText   string          `json:"output_text"`
-	RequestBody  json.RawMessage `json:"request_body"`
-	ResponseBody json.RawMessage `json:"response_body"`
-}
-
+// GetRequestDetail returns a single request log with full JSON bodies.
 func (s *Store) GetRequestDetail(id uint64) (*RequestDetail, error) {
-	if s == nil || s.ch == nil {
-		return nil, fmt.Errorf("clickhouse not available")
+	if s == nil || s.logStore == nil {
+		return nil, fmt.Errorf("log store not available")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	var d RequestDetail
-	var rawID uint64
-	var ts time.Time
-	var sc uint16
-	var lat, tin, tout uint32
-	var reqBody, respBody string
-	err := s.ch.QueryRow(ctx, `
-		SELECT id, timestamp, client_key, model, upstream, account_id,
-		       status_code, latency_ms, tokens_in, tokens_out, error_msg,
-		       input_text, output_text, request_body, response_body
-		FROM request_logs
-		WHERE id = ?
-		LIMIT 1
-	`, id).Scan(&rawID, &ts, &d.ClientKey, &d.Model, &d.Upstream,
-		&d.AccountID, &sc, &lat, &tin, &tout, &d.ErrorMsg,
-		&d.InputText, &d.OutputText, &reqBody, &respBody)
-	if err != nil {
-		return nil, err
-	}
-	d.ID = strconv.FormatUint(rawID, 10)
-	d.StatusCode = int(sc)
-	d.LatencyMs = int(lat)
-	d.TokensIn = int(tin)
-	d.TokensOut = int(tout)
-	d.Timestamp = ts.UTC().Format("2006-01-02 15:04:05")
-	if reqBody != "" {
-		d.RequestBody = json.RawMessage(reqBody)
-	}
-	if respBody != "" {
-		d.ResponseBody = json.RawMessage(respBody)
-	}
-	return &d, nil
+	return s.logStore.GetRequestDetail(ctx, id)
 }
 
 // ============================================================================
@@ -1484,7 +1096,7 @@ func (s *Store) Close() {
 	if s.rdb != nil {
 		_ = s.rdb.Close()
 	}
-	if s.ch != nil {
-		_ = s.ch.Close()
+	if s.logStore != nil {
+		_ = s.logStore.Close()
 	}
 }
