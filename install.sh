@@ -27,7 +27,7 @@
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
-IMAGE_GATEWAY="ghcr.io/rilspratama/foxrouters:latest"
+IMAGE_GATEWAY="${IMAGE_GATEWAY:-ghcr.io/rilspratama/foxrouters:latest}"
 IMAGE_REDIS="redis:7-alpine"
 IMAGE_CLICKHOUSE="clickhouse/clickhouse-server:latest"
 GATEWAY_PORT="${FOXROUTERS_PORT:-20130}"
@@ -139,6 +139,10 @@ info "Creating Docker network + volumes..."
 docker network create "${NETWORK}"    2>/dev/null || ok "Network ${NETWORK} already exists"
 docker volume  create "${VOL_REDIS}"  2>/dev/null || ok "Volume ${VOL_REDIS} already exists"
 docker volume  create "${VOL_SQLITE}" 2>/dev/null || ok "Volume ${VOL_SQLITE} already exists"
+
+# Fix volume ownership: gateway runs as UID 1000 (non-root).
+# Without this, SQLite can't write to /var/lib/foxrouters/logs.db.
+docker run --rm -v "${VOL_SQLITE}:/data" alpine chown -R 1000:1000 /data 2>/dev/null || true
 if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
     docker volume create "${VOL_CH}" 2>/dev/null || ok "Volume ${VOL_CH} already exists"
 fi
@@ -147,9 +151,14 @@ fi
 info "Pulling images (this may take a few minutes on first run)..."
 docker pull "${IMAGE_REDIS}"      2>&1 | tail -1
 if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
-    docker pull "${IMAGE_CLICKHOUSE}" 2>&1 | tail -1
+    docker pull "${IMAGE_CLICKHOUSE}"  2>&1 | tail -1
 fi
-docker pull "${IMAGE_GATEWAY}"    2>&1 | tail -1
+# Only pull gateway if not already present locally (avoid overwriting local builds)
+if ! docker image inspect "${IMAGE_GATEWAY}" &>/dev/null; then
+    docker pull "${IMAGE_GATEWAY}"    2>&1 | tail -1
+else
+    ok "Gateway image found locally: ${IMAGE_GATEWAY}"
+fi
 ok "Images pulled"
 
 # ── Step 6: Start Redis ─────────────────────────────────────────────────────
