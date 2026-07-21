@@ -42,7 +42,8 @@ CONFIG_DIR="/etc/foxrouters"
 ENV_FILE="${CONFIG_DIR}/.env"
 KEY_FILE="${CONFIG_DIR}/gateway-key.txt"
 TUNNEL_CONFIG_DIR="${CONFIG_DIR}/cloudflared"
-TUNNEL_CONTAINER="foxrouters-tunnel"
+TUNNEL_CONTAINER_QUICK="foxrouters-tunnel-quick"
+TUNNEL_CONTAINER_NAMED="foxrouters-tunnel-named"
 IMAGE_TUNNEL="cloudflare/cloudflared:latest"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
@@ -295,54 +296,58 @@ if [[ -z "${TUNNEL_MODE}" ]]; then
         echo "  Expose the gateway publicly via Cloudflare (no firewall changes)."
         echo "  [1] Quick — random *.trycloudflare.com URL (no domain, no login)"
         echo "  [2] Named — custom domain (requires prior cloudflared login + create)"
-        echo "  [3] No tunnel"
+        echo "  [3] Hybrid — BOTH quick + named (quick now, add named later)"
+        echo "  [4] No tunnel"
         echo ""
-        read -r -p "Choice [3]: " TCHOICE || TCHOICE=""
+        read -r -p "Choice [4]: " TCHOICE || TCHOICE=""
         case "${TCHOICE}" in
-            1|q|quick) TUNNEL_MODE="quick" ;;
-            2|n|named) TUNNEL_MODE="named" ;;
-            *)         TUNNEL_MODE="none"  ;;
+            1|q|quick)   TUNNEL_MODE="quick" ;;
+            2|n|named)   TUNNEL_MODE="named" ;;
+            3|h|hybrid)  TUNNEL_MODE="hybrid" ;;
+            *)           TUNNEL_MODE="none"  ;;
         esac
     else
         TUNNEL_MODE="none"
     fi
 fi
 case "${TUNNEL_MODE}" in
-    none|quick|named) ;;
+    none|quick|named|hybrid) ;;
     *)
-        err "Unknown TUNNEL_MODE=${TUNNEL_MODE} — must be none, quick, or named"
+        err "Unknown TUNNEL_MODE=${TUNNEL_MODE} — must be none, quick, named, or hybrid"
         exit 1
         ;;
 esac
 
 TUNNEL_URL=""
-if [[ "${TUNNEL_MODE}" == "quick" ]]; then
+TUNNEL_CONTAINER_QUICK="foxrouters-tunnel-quick"
+TUNNEL_CONTAINER_NAMED="foxrouters-tunnel-named"
+
+start_quick_tunnel() {
     info "Starting Cloudflare quick tunnel..."
     docker pull "${IMAGE_TUNNEL}" 2>&1 | tail -1 || true
-    docker rm -f "${TUNNEL_CONTAINER}" 2>/dev/null || true
+    docker rm -f "${TUNNEL_CONTAINER_QUICK}" 2>/dev/null || true
     docker run -d \
-        --name "${TUNNEL_CONTAINER}" \
+        --name "${TUNNEL_CONTAINER_QUICK}" \
         --network "${NETWORK}" \
         --restart unless-stopped \
         "${IMAGE_TUNNEL}" \
         tunnel --no-autoupdate --url "http://foxrouters:20130" >/dev/null
-    mkdir -p "${TUNNEL_CONFIG_DIR}"
-    echo "quick" > "${TUNNEL_CONFIG_DIR}/mode"
-    info "Waiting for tunnel URL (up to 30s)..."
+    info "Waiting for quick tunnel URL (up to 30s)..."
     for _ in $(seq 1 30); do
-        TUNNEL_URL=$(docker logs "${TUNNEL_CONTAINER}" 2>&1 \
+        TUNNEL_URL=$(docker logs "${TUNNEL_CONTAINER_QUICK}" 2>&1 \
             | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
             | head -1 || true)
         [[ -n "${TUNNEL_URL}" ]] && break
         sleep 1
     done
     if [[ -n "${TUNNEL_URL}" ]]; then
-        ok "Tunnel URL: ${TUNNEL_URL}"
+        ok "Quick tunnel URL: ${TUNNEL_URL}"
     else
-        err "Could not capture tunnel URL. Check: docker logs ${TUNNEL_CONTAINER}"
+        err "Could not capture quick tunnel URL. Check: docker logs ${TUNNEL_CONTAINER_QUICK}"
     fi
-elif [[ "${TUNNEL_MODE}" == "named" ]]; then
-    info "Named tunnel selected — auto-start skipped (needs prior setup)."
+}
+
+print_named_setup() {
     echo ""
     yellow "  Named tunnels require manual one-time setup:"
     echo "    1. cloudflared tunnel login"
@@ -352,9 +357,35 @@ elif [[ "${TUNNEL_MODE}" == "named" ]]; then
     echo "       sudo cp ~/.cloudflared/<tunnel>.json   ${TUNNEL_CONFIG_DIR}/"
     echo "    4. Write ${TUNNEL_CONFIG_DIR}/config.yml with ingress rules"
     echo "    5. cloudflared tunnel route dns foxrouters gateway.example.com"
-    echo "    6. ./tunnel.sh enable --named"
+    echo "    6. ./tunnel.sh enable --named  (or --hybrid to run both)"
     echo ""
-fi
+}
+
+mkdir -p "${TUNNEL_CONFIG_DIR}"
+
+case "${TUNNEL_MODE}" in
+    quick)
+        echo "quick" > "${TUNNEL_CONFIG_DIR}/mode"
+        start_quick_tunnel
+        ;;
+    named)
+        echo "named" > "${TUNNEL_CONFIG_DIR}/mode"
+        info "Named tunnel selected — auto-start skipped (needs prior setup)."
+        print_named_setup
+        ;;
+    hybrid)
+        echo "hybrid" > "${TUNNEL_CONFIG_DIR}/mode"
+        info "Hybrid mode: starting quick tunnel now..."
+        start_quick_tunnel
+        echo ""
+        info "Named tunnel: auto-start skipped (needs prior setup)."
+        info "After setup, run: ./tunnel.sh enable --hybrid"
+        print_named_setup
+        ;;
+    none)
+        echo "none" > "${TUNNEL_CONFIG_DIR}/mode"
+        ;;
+esac
 
 # ── Summary ─────────────────────────────────────────────────────────────────
 echo ""
@@ -377,6 +408,8 @@ if [[ "${TUNNEL_MODE}" == "quick" && -n "${TUNNEL_URL}" ]]; then
     echo "  Tunnel:       ${TUNNEL_URL}  (quick — URL changes on restart)"
 elif [[ "${TUNNEL_MODE}" == "named" ]]; then
     echo "  Tunnel:       named (finish setup, then ./tunnel.sh enable --named)"
+elif [[ "${TUNNEL_MODE}" == "hybrid" && -n "${TUNNEL_URL}" ]]; then
+    echo "  Tunnel:       ${TUNNEL_URL}  (quick active, add named via ./tunnel.sh enable --hybrid)"
 else
     echo "  Tunnel:       disabled  (./tunnel.sh enable to add one later)"
 fi

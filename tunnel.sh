@@ -11,12 +11,15 @@
 #           JSON at /etc/foxrouters/cloudflared/ (see NAMED SETUP below).
 #
 # Usage:
-#   ./tunnel.sh enable [--quick|--named]   Start tunnel (default: quick).
-#   ./tunnel.sh disable                    Stop + remove the tunnel container.
-#   ./tunnel.sh status                     Show container state + current URL.
-#   ./tunnel.sh url                        Print current tunnel URL.
-#   ./tunnel.sh restart                    Restart (keeps the same mode).
-#   ./tunnel.sh logs [-f]                  Tail cloudflared container logs.
+#   ./tunnel.sh enable [--quick|--named|--hybrid]  Start tunnel(s).
+#                                                  quick: random URL only
+#                                                  named: custom domain only
+#                                                  hybrid: BOTH quick + named
+#   ./tunnel.sh disable                            Stop + remove all tunnel containers.
+#   ./tunnel.sh status                             Show all tunnel states + URLs.
+#   ./tunnel.sh url                                Print all running tunnel URLs.
+#   ./tunnel.sh restart                            Restart (keeps the same mode).
+#   ./tunnel.sh logs [quick|named] [-f]            Tail cloudflared logs.
 #
 # NAMED SETUP (once, on host):
 #   1. cloudflared tunnel login
@@ -40,7 +43,8 @@
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
-CONTAINER="foxrouters-tunnel"
+CONTAINER_QUICK="foxrouters-tunnel-quick"
+CONTAINER_NAMED="foxrouters-tunnel-named"
 IMAGE="cloudflare/cloudflared:latest"
 NETWORK="foxrouters-net"
 UPSTREAM="http://foxrouters:20130"
@@ -75,11 +79,13 @@ ensure_network() {
 }
 
 is_running() {
-    [[ "$(docker inspect -f '{{.State.Running}}' "${CONTAINER}" 2>/dev/null || echo false)" == "true" ]]
+    local c="$1"
+    [[ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo false)" == "true" ]]
 }
 
 exists() {
-    docker inspect "${CONTAINER}" &>/dev/null
+    local c="$1"
+    docker inspect "$c" &>/dev/null
 }
 
 save_mode() {
@@ -99,9 +105,10 @@ load_mode() {
 # print a banner like "https://<slug>.trycloudflare.com" once the tunnel is
 # established — polls up to ~30s.
 capture_quick_url() {
+    local c="$1"
     local url=""
     for _ in $(seq 1 30); do
-        url=$(docker logs "${CONTAINER}" 2>&1 \
+        url=$(docker logs "$c" 2>&1 \
               | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
               | head -1 || true)
         if [[ -n "${url}" ]]; then
@@ -115,26 +122,25 @@ capture_quick_url() {
 
 start_quick() {
     info "Starting quick tunnel → ${UPSTREAM}"
-    docker rm -f "${CONTAINER}" 2>/dev/null || true
+    docker rm -f "${CONTAINER_QUICK}" 2>/dev/null || true
     docker run -d \
-        --name "${CONTAINER}" \
+        --name "${CONTAINER_QUICK}" \
         --network "${NETWORK}" \
         --restart unless-stopped \
         "${IMAGE}" \
         tunnel --no-autoupdate --url "${UPSTREAM}" >/dev/null
-    save_mode "quick"
-    ok "Container '${CONTAINER}' started (quick mode)"
+    ok "Container '${CONTAINER_QUICK}' started (quick mode)"
 
-    info "Waiting for tunnel URL (up to 30s)..."
-    if URL=$(capture_quick_url); then
+    info "Waiting for quick tunnel URL (up to 30s)..."
+    if URL=$(capture_quick_url "${CONTAINER_QUICK}"); then
         echo ""
-        bold "  Tunnel URL: ${URL}"
+        bold "  Quick Tunnel URL: ${URL}"
         echo ""
         yellow "  ⚠  Quick tunnels are ephemeral — the URL changes on every restart."
-        yellow "     Use './tunnel.sh enable --named' for a persistent custom domain."
+        yellow "     Use named tunnel for a persistent custom domain."
     else
-        err "Could not capture tunnel URL. Check: docker logs ${CONTAINER}"
-        exit 1
+        err "Could not capture quick tunnel URL. Check: docker logs ${CONTAINER_QUICK}"
+        return 1
     fi
 }
 
@@ -142,28 +148,27 @@ start_named() {
     info "Starting named tunnel from ${CONFIG_DIR}"
     if [[ ! -d "${CONFIG_DIR}" ]]; then
         err "Config dir ${CONFIG_DIR} missing. See NAMED SETUP in tunnel.sh."
-        exit 1
+        return 1
     fi
     if [[ ! -f "${CONFIG_DIR}/config.yml" ]]; then
         err "${CONFIG_DIR}/config.yml missing. See NAMED SETUP in tunnel.sh."
-        exit 1
+        return 1
     fi
     if ! ls "${CONFIG_DIR}"/*.json &>/dev/null; then
         err "No <tunnel-id>.json credentials found in ${CONFIG_DIR}."
         err "Run 'cloudflared tunnel create foxrouters' and copy the JSON here."
-        exit 1
+        return 1
     fi
 
-    docker rm -f "${CONTAINER}" 2>/dev/null || true
+    docker rm -f "${CONTAINER_NAMED}" 2>/dev/null || true
     docker run -d \
-        --name "${CONTAINER}" \
+        --name "${CONTAINER_NAMED}" \
         --network "${NETWORK}" \
         --restart unless-stopped \
         -v "${CONFIG_DIR}:/etc/cloudflared:ro" \
         "${IMAGE}" \
         tunnel --no-autoupdate --config /etc/cloudflared/config.yml run >/dev/null
-    save_mode "named"
-    ok "Container '${CONTAINER}' started (named mode)"
+    ok "Container '${CONTAINER_NAMED}' started (named mode)"
 
     # Best-effort: pull the hostname out of config.yml so the user sees the URL
     # without hunting through cloudflared logs.
@@ -171,10 +176,10 @@ start_named() {
                | head -1 | awk -F: '{print $2}' | tr -d ' ' || true)
     if [[ -n "${HOSTNAME}" ]]; then
         echo ""
-        bold "  Tunnel URL: https://${HOSTNAME}"
+        bold "  Named Tunnel URL: https://${HOSTNAME}"
         echo ""
     else
-        info "Tunnel started. Check the hostname(s) in ${CONFIG_DIR}/config.yml"
+        info "Named tunnel started. Check the hostname(s) in ${CONFIG_DIR}/config.yml"
     fi
 }
 
@@ -186,74 +191,124 @@ cmd_enable() {
     case "${1:-}" in
         --quick|quick|"") mode="quick" ;;
         --named|named)    mode="named" ;;
-        *) err "Unknown mode: $1 (use --quick or --named)"; exit 1 ;;
+        --hybrid|hybrid)  mode="hybrid" ;;
+        *) err "Unknown mode: $1 (use --quick, --named, or --hybrid)"; exit 1 ;;
     esac
 
-    if [[ "${mode}" == "quick" ]]; then
-        start_quick
-    else
-        start_named
-    fi
+    save_mode "${mode}"
+
+    case "${mode}" in
+        quick)  start_quick ;;
+        named)  start_named ;;
+        hybrid)
+            info "Hybrid mode: starting BOTH quick + named tunnels..."
+            start_quick || true
+            echo ""
+            start_named || true
+            echo ""
+            ok "Hybrid mode active — both tunnels running."
+            ;;
+    esac
 }
 
 cmd_disable() {
     need_docker
-    if ! exists; then
-        info "No tunnel container present."
-        return 0
+    local stopped=0
+    for c in "${CONTAINER_QUICK}" "${CONTAINER_NAMED}"; do
+        if docker inspect "$c" &>/dev/null; then
+            info "Stopping ${c}..."
+            docker rm -f "$c" >/dev/null
+            stopped=1
+        fi
+    done
+    if [[ "${stopped}" == "0" ]]; then
+        info "No tunnel containers present."
+    else
+        ok "All tunnels disabled."
     fi
-    info "Stopping tunnel..."
-    docker rm -f "${CONTAINER}" >/dev/null
-    ok "Tunnel disabled."
 }
 
 cmd_status() {
     need_docker
-    if ! exists; then
-        yellow "Tunnel: not installed (container '${CONTAINER}' does not exist)"
-        return 0
+    local any=0
+
+    # Quick tunnel
+    if exists "${CONTAINER_QUICK}"; then
+        any=1
+        if is_running "${CONTAINER_QUICK}"; then
+            green "Quick Tunnel: RUNNING"
+            docker ps --filter "name=^/${CONTAINER_QUICK}$" \
+                --format '  container: {{.Names}}   status: {{.Status}}'
+            local qurl
+            qurl=$(docker logs "${CONTAINER_QUICK}" 2>&1 \
+                   | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+                   | tail -1 || true)
+            if [[ -n "${qurl}" ]]; then
+                echo "  URL: ${qurl}"
+            fi
+        else
+            yellow "Quick Tunnel: STOPPED"
+        fi
+        echo ""
     fi
-    if is_running; then
-        green "Tunnel: RUNNING (mode: $(load_mode))"
-        docker ps --filter "name=^/${CONTAINER}$" \
-            --format '  container: {{.Names}}   image: {{.Image}}   status: {{.Status}}'
-        cmd_url || true
-    else
-        yellow "Tunnel: STOPPED (container exists but not running)"
+
+    # Named tunnel
+    if exists "${CONTAINER_NAMED}"; then
+        any=1
+        if is_running "${CONTAINER_NAMED}"; then
+            green "Named Tunnel: RUNNING"
+            docker ps --filter "name=^/${CONTAINER_NAMED}$" \
+                --format '  container: {{.Names}}   status: {{.Status}}'
+            if [[ -f "${CONFIG_DIR}/config.yml" ]]; then
+                local host
+                host=$(grep -E '^\s*-?\s*hostname:' "${CONFIG_DIR}/config.yml" \
+                       | head -1 | awk -F: '{print $2}' | tr -d ' ')
+                if [[ -n "${host}" ]]; then
+                    echo "  URL: https://${host}"
+                fi
+            fi
+        else
+            yellow "Named Tunnel: STOPPED"
+        fi
+    fi
+
+    if [[ "${any}" == "0" ]]; then
+        yellow "Tunnels: none installed"
+        echo "  Run: ./tunnel.sh enable [--quick|--named|--hybrid]"
     fi
 }
 
 cmd_url() {
     need_docker
-    if ! exists; then
-        err "No tunnel container. Run: ./tunnel.sh enable"
-        return 1
-    fi
-    local mode
-    mode=$(load_mode)
-    if [[ "${mode}" == "quick" ]]; then
-        local url
-        url=$(docker logs "${CONTAINER}" 2>&1 \
-              | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
-              | tail -1 || true)
-        if [[ -n "${url}" ]]; then
-            echo "${url}"
-        else
-            err "Quick tunnel URL not yet available. Check: docker logs ${CONTAINER}"
-            return 1
+    local found=0
+
+    # Quick tunnel URL
+    if exists "${CONTAINER_QUICK}" && is_running "${CONTAINER_QUICK}"; then
+        local qurl
+        qurl=$(docker logs "${CONTAINER_QUICK}" 2>&1 \
+               | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+               | tail -1 || true)
+        if [[ -n "${qurl}" ]]; then
+            echo "quick: ${qurl}"
+            found=1
         fi
-    else
-        # Named mode — parse the first hostname from config.yml.
+    fi
+
+    # Named tunnel URL
+    if exists "${CONTAINER_NAMED}" && is_running "${CONTAINER_NAMED}"; then
         if [[ -f "${CONFIG_DIR}/config.yml" ]]; then
             local host
             host=$(grep -E '^\s*-?\s*hostname:' "${CONFIG_DIR}/config.yml" \
                    | head -1 | awk -F: '{print $2}' | tr -d ' ')
             if [[ -n "${host}" ]]; then
-                echo "https://${host}"
-                return 0
+                echo "named: https://${host}"
+                found=1
             fi
         fi
-        err "Named tunnel hostname not found in ${CONFIG_DIR}/config.yml"
+    fi
+
+    if [[ "${found}" == "0" ]]; then
+        err "No running tunnels. Run: ./tunnel.sh enable"
         return 1
     fi
 }
@@ -263,29 +318,56 @@ cmd_restart() {
     ensure_network
     local mode
     mode=$(load_mode)
-    info "Restarting tunnel in '${mode}' mode..."
-    if [[ "${mode}" == "named" ]]; then
-        start_named
-    else
-        start_quick
-    fi
+    info "Restarting tunnels in '${mode}' mode..."
+    cmd_disable 2>/dev/null || true
+    sleep 1
+    cmd_enable "--${mode}"
 }
 
 cmd_logs() {
     need_docker
-    if ! exists; then
-        err "No tunnel container. Run: ./tunnel.sh enable"
-        exit 1
-    fi
-    if [[ "${1:-}" == "-f" || "${1:-}" == "--follow" ]]; then
-        docker logs -f "${CONTAINER}"
-    else
-        docker logs --tail 100 "${CONTAINER}"
-    fi
+    local target="${1:-}"
+    shift || true
+    local follow=""
+    [[ "${1:-}" == "-f" || "${1:-}" == "--follow" ]] && follow="-f"
+
+    case "${target}" in
+        quick)
+            if ! exists "${CONTAINER_QUICK}"; then
+                err "No quick tunnel container. Run: ./tunnel.sh enable --quick"
+                exit 1
+            fi
+            docker logs ${follow} --tail 100 "${CONTAINER_QUICK}"
+            ;;
+        named)
+            if ! exists "${CONTAINER_NAMED}"; then
+                err "No named tunnel container. Run: ./tunnel.sh enable --named"
+                exit 1
+            fi
+            docker logs ${follow} --tail 100 "${CONTAINER_NAMED}"
+            ;;
+        "")
+            # Show both if they exist
+            local shown=0
+            for c in "${CONTAINER_QUICK}" "${CONTAINER_NAMED}"; do
+                if exists "$c"; then
+                    echo "=== ${c} ==="
+                    docker logs --tail 50 "$c" 2>&1 | tail -20
+                    echo ""
+                    shown=1
+                fi
+            done
+            [[ "${shown}" == "0" ]] && err "No tunnel containers found."
+            ;;
+        *)
+            err "Unknown target: ${target} (use 'quick', 'named', or omit for both)"
+            exit 1
+            ;;
+    esac
 }
 
 usage() {
-    sed -n '2,25p' "$0"
+    sed -n '2,28p' "$0"
     exit 1
 }
 
@@ -296,7 +378,7 @@ case "${1:-}" in
     status)  cmd_status ;;
     url)     cmd_url ;;
     restart) cmd_restart ;;
-    logs)    shift; cmd_logs "${1:-}" ;;
+    logs)    shift; cmd_logs "${1:-}" "${2:-}" ;;
     -h|--help|help|"") usage ;;
     *) err "Unknown command: $1"; usage ;;
 esac
