@@ -23,6 +23,7 @@ import (
 
 	"foxrouters/internal/handlers"
 	"foxrouters/internal/ratelimit"
+	"foxrouters/internal/tunnel"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -145,6 +146,22 @@ func main() {
 	}
 	setUpstreamProxyPool(proxyPool)
 
+	// Cloudflare Tunnel manager (v1.6.0). Owns cloudflared subprocess
+	// lifecycle + named-tunnel control plane via cloudflare-go v7 SDK.
+	// Config lives in Redis so mode + credentials survive restarts.
+	cloudflaredPath := os.Getenv("CLOUDFLARED_PATH")
+	if cloudflaredPath == "" {
+		cloudflaredPath = "/usr/local/bin/cloudflared"
+	}
+	tunnelUpstream := os.Getenv("TUNNEL_UPSTREAM_URL")
+	if tunnelUpstream == "" {
+		tunnelUpstream = "http://127.0.0.1:" + port
+	}
+	tunnelMgr := tunnel.NewManager(db.Redis(), cloudflaredPath, tunnelUpstream)
+	// Auto-start in background — must NOT block gateway boot even if
+	// cloudflared is missing or Cloudflare API is unreachable.
+	go tunnelMgr.AutoStart()
+
 	go autoRefreshWorker(grokAM)
 	go reenableWorker(grokAM)
 	go reenableCBWorker(cbKM)
@@ -259,6 +276,14 @@ func main() {
 	r.POST("/api/proxies/:id/toggle", csrfGuard(), adminAuth, handleToggleProxy(proxyPool))
 	r.POST("/api/proxies/:id/test", csrfGuard(), adminAuth, handleTestProxy(proxyPool))
 
+	// Cloudflare Tunnel (v1.6.0) — admin only. Manages the embedded
+	// cloudflared subprocess (data plane) + named-tunnel lifecycle via
+	// cloudflare-go v7 SDK (control plane). Config persisted in Redis.
+	r.GET("/api/tunnel/status", adminAuth, handleTunnelStatus(tunnelMgr))
+	r.POST("/api/tunnel/enable", csrfGuard(), adminAuth, handleTunnelEnable(tunnelMgr))
+	r.POST("/api/tunnel/disable", csrfGuard(), adminAuth, handleTunnelDisable(tunnelMgr))
+	r.POST("/api/tunnel/restart", csrfGuard(), adminAuth, handleTunnelRestart(tunnelMgr))
+
 	// /v1/*path catch-all — gin's httprouter doesn't allow a static
 	// /v1/messages segment alongside /v1/*path, so we dispatch the
 	// Anthropic Messages API adapter from inside the catch-all (POST only).
@@ -340,6 +365,9 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("shutdown error", "module", "server", "error", err)
 	}
+	// Stop cloudflared subprocesses cleanly before Redis close so any
+	// final status writes go through.
+	tunnelMgr.Shutdown()
 	// db.Close() runs via defer — drains async log channels best-effort
 	slog.Info("stopped", "module", "server")
 }

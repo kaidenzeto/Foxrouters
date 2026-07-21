@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage build for FoxRouters.
 # dashboard.html is compiled into the binary via go:embed, so runtime image
-# only needs the static binary + CA roots + wget (for healthcheck).
+# only needs the static binary + CA roots + wget (for healthcheck) +
+# cloudflared (data plane for /api/tunnel/* — v1.6.0).
 
 # -----------------------------------------------------------------------------
 # Stage 1: builder
@@ -27,13 +28,31 @@ COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.Version=${VERSION}" -o foxrouters .
 
 # -----------------------------------------------------------------------------
-# Stage 2: runtime
+# Stage 2: cloudflared downloader
+# Pulled in its own stage so the runtime layer stays free of curl/build tools.
+# Pinned to a specific release for reproducibility; bump when Cloudflare
+# ships a security fix (~monthly cadence).
+# -----------------------------------------------------------------------------
+FROM alpine:3.20 AS cloudflared
+
+ARG CLOUDFLARED_VERSION=2025.11.1
+ARG TARGETARCH=amd64
+
+RUN apk add --no-cache curl \
+ && curl -fsSL -o /usr/local/bin/cloudflared \
+      "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TARGETARCH}" \
+ && chmod +x /usr/local/bin/cloudflared \
+ && /usr/local/bin/cloudflared --version
+
+# -----------------------------------------------------------------------------
+# Stage 3: runtime
 # -----------------------------------------------------------------------------
 FROM alpine:3.20 AS runtime
 
-# ca-certificates → outbound TLS (grok.com, codebuddy.ai)
+# ca-certificates → outbound TLS (grok.com, codebuddy.ai, api.cloudflare.com)
 # wget           → HEALTHCHECK probe
-RUN apk add --no-cache ca-certificates wget
+# libc6-compat   → cloudflared static-ish binary needs libc glue on alpine
+RUN apk add --no-cache ca-certificates wget libc6-compat
 
 # Non-root user (UID 1000) for least-privilege runtime.
 RUN adduser -D -u 1000 foxrouters
@@ -41,8 +60,18 @@ RUN adduser -D -u 1000 foxrouters
 WORKDIR /app
 
 COPY --from=builder /build/foxrouters .
+COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared
+
+# cloudflared writes small caches to $HOME/.cloudflared — give it a
+# writable dir owned by the non-root user.
+RUN mkdir -p /home/foxrouters/.cloudflared \
+ && chown -R foxrouters:foxrouters /home/foxrouters
 
 USER foxrouters
+
+# Point the tunnel manager at the embedded binary (also the default,
+# but explicit env is nicer for operators inspecting `docker inspect`).
+ENV CLOUDFLARED_PATH=/usr/local/bin/cloudflared
 
 EXPOSE 20130
 

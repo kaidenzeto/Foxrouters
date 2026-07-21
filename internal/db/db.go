@@ -231,6 +231,17 @@ func NewStore() (*Store, error) {
 // Used by callers who want a fast pre-check before attempting a query.
 func (s *Store) Ready() bool { return s != nil && s.rdb != nil }
 
+// Redis exposes the underlying *redis.Client so peer packages (e.g.
+// internal/tunnel) can persist their own state without dragging every
+// operation through the Store. Returns nil when the store is not
+// initialised.
+func (s *Store) Redis() *redis.Client {
+	if s == nil {
+		return nil
+	}
+	return s.rdb
+}
+
 // DeleteGrokAccount removes the Redis HASH for a grok account by email.
 func (s *Store) DeleteGrokAccount(email string) {
 	if s == nil || s.rdb == nil {
