@@ -58,10 +58,18 @@ type anthropicMessage struct {
 }
 
 // contentBlockIn: one block from an Anthropic content-array message.
+// Supports text, tool_use (assistant messages), and tool_result (user messages).
 type contentBlockIn struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-	// Vision / other block types are ignored for now (best-effort text extraction).
+	// tool_use fields (appear in assistant messages)
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+	// tool_result fields (appear in user messages)
+	ToolUseID     string          `json:"tool_use_id,omitempty"`
+	ToolContent   json.RawMessage `json:"content,omitempty"`
+	IsError       bool            `json:"is_error,omitempty"`
 }
 
 // ============================================================================
@@ -69,19 +77,26 @@ type contentBlockIn struct {
 // ============================================================================
 
 type anthropicResponse struct {
-	ID           string                    `json:"id"`
-	Type         string                    `json:"type"`
-	Role         string                    `json:"role"`
-	Model        string                    `json:"model"`
+	ID           string                     `json:"id"`
+	Type         string                     `json:"type"`
+	Role         string                     `json:"role"`
+	Model        string                     `json:"model"`
 	Content      []anthropicContentBlockOut `json:"content"`
-	StopReason   string                    `json:"stop_reason"`
-	StopSequence *string                   `json:"stop_sequence"`
-	Usage        anthropicUsage            `json:"usage"`
+	StopReason   string                     `json:"stop_reason"`
+	StopSequence *string                    `json:"stop_sequence"`
+	Usage        anthropicUsage             `json:"usage"`
 }
 
+// anthropicContentBlockOut is emitted in Anthropic responses. Supports both
+// text blocks and tool_use blocks. Fields are omitted based on Type.
 type anthropicContentBlockOut struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type string `json:"type"` // "text" or "tool_use"
+	// text-block fields
+	Text string `json:"text,omitempty"`
+	// tool_use-block fields
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 type anthropicUsage struct {
@@ -159,6 +174,203 @@ func extractText(raw json.RawMessage) string {
 	return ""
 }
 
+// extractToolResultContent flattens Anthropic tool_result content into a
+// string suitable for OpenAI's role:tool message. Anthropic tool_result
+// content can be a string or an array of {type:"text", text:"..."} blocks.
+func extractToolResultContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []contentBlockIn
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var parts []string
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	// Last-ditch: marshal the raw JSON back to string.
+	return string(raw)
+}
+
+// translateMessages converts an Anthropic messages array to OpenAI messages,
+// handling text, tool_use (assistant → tool_calls), and tool_result
+// (user → role:tool). One Anthropic message may fan out into multiple OpenAI
+// messages (e.g. a user message with several tool_result blocks becomes
+// several role:tool messages).
+func translateMessages(msgs []anthropicMessage) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs)+1)
+	for _, m := range msgs {
+		// Try string content first — most common shape.
+		var plain string
+		if err := json.Unmarshal(m.Content, &plain); err == nil {
+			out = append(out, map[string]any{"role": m.Role, "content": plain})
+			continue
+		}
+		// Array of content blocks.
+		var blocks []contentBlockIn
+		if err := json.Unmarshal(m.Content, &blocks); err != nil {
+			// Fallback: stringify.
+			out = append(out, map[string]any{"role": m.Role, "content": extractText(m.Content)})
+			continue
+		}
+
+		if m.Role == "user" {
+			// Split into a text portion + any tool_result blocks.
+			var textParts []string
+			var toolResults []map[string]any
+			for _, b := range blocks {
+				switch b.Type {
+				case "text":
+					if b.Text != "" {
+						textParts = append(textParts, b.Text)
+					}
+				case "tool_result":
+					tr := map[string]any{
+						"role":         "tool",
+						"tool_call_id": b.ToolUseID,
+						"content":      extractToolResultContent(b.ToolContent),
+					}
+					toolResults = append(toolResults, tr)
+				}
+			}
+			if len(textParts) > 0 {
+				out = append(out, map[string]any{"role": "user", "content": strings.Join(textParts, "\n")})
+			}
+			out = append(out, toolResults...)
+			continue
+		}
+
+		if m.Role == "assistant" {
+			// Text goes in content; tool_use blocks become tool_calls.
+			var textParts []string
+			var toolCalls []map[string]any
+			for _, b := range blocks {
+				switch b.Type {
+				case "text":
+					if b.Text != "" {
+						textParts = append(textParts, b.Text)
+					}
+				case "tool_use":
+					// input is a JSON object; OpenAI wants function.arguments as a JSON string.
+					args := string(b.Input)
+					if args == "" {
+						args = "{}"
+					}
+					toolCalls = append(toolCalls, map[string]any{
+						"id":   b.ID,
+						"type": "function",
+						"function": map[string]any{
+							"name":      b.Name,
+							"arguments": args,
+						},
+					})
+				}
+			}
+			asst := map[string]any{"role": "assistant"}
+			if len(textParts) > 0 {
+				asst["content"] = strings.Join(textParts, "\n")
+			} else {
+				asst["content"] = nil
+			}
+			if len(toolCalls) > 0 {
+				asst["tool_calls"] = toolCalls
+			}
+			out = append(out, asst)
+			continue
+		}
+
+		// Unknown role — best-effort text.
+		out = append(out, map[string]any{"role": m.Role, "content": extractText(m.Content)})
+	}
+	return out
+}
+
+// translateTools converts Anthropic tools array to OpenAI tools array.
+// Anthropic: [{name, description, input_schema}]
+// OpenAI:    [{type:"function", function:{name, description, parameters}}]
+func translateTools(raw json.RawMessage) []map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var atools []struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &atools); err != nil {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(atools))
+	for _, t := range atools {
+		fn := map[string]any{"name": t.Name}
+		if t.Description != "" {
+			fn["description"] = t.Description
+		}
+		if len(t.InputSchema) > 0 {
+			fn["parameters"] = json.RawMessage(t.InputSchema)
+		} else {
+			// OpenAI wants an object schema; empty ok.
+			fn["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		out = append(out, map[string]any{"type": "function", "function": fn})
+	}
+	return out
+}
+
+// translateToolChoice converts Anthropic tool_choice to OpenAI tool_choice.
+// Anthropic shapes:
+//   {"type":"auto"}                          → "auto"
+//   {"type":"any"}                           → "required"
+//   {"type":"none"}                          → "none"
+//   {"type":"tool", "name":"get_weather"}    → {"type":"function","function":{"name":"get_weather"}}
+// Also accepts a bare string ("auto"/"any"/"none").
+func translateToolChoice(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		switch s {
+		case "any":
+			return "required"
+		case "auto", "none":
+			return s
+		}
+		return "auto"
+	}
+	var obj struct {
+		Type string `json:"type"`
+		Name string `json:"name,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	switch obj.Type {
+	case "auto":
+		return "auto"
+	case "any":
+		return "required"
+	case "none":
+		return "none"
+	case "tool":
+		if obj.Name == "" {
+			return "auto"
+		}
+		return map[string]any{
+			"type":     "function",
+			"function": map[string]any{"name": obj.Name},
+		}
+	}
+	return "auto"
+}
+
 // buildOpenAIBody translates Anthropic → OpenAI /v1/chat/completions payload.
 func buildOpenAIBody(req *anthropicRequest, reg *proxy.CustomRegistry) ([]byte, string, error) {
 	upstreamModel := mapAnthropicModel(req.Model, reg)
@@ -173,10 +385,7 @@ func buildOpenAIBody(req *anthropicRequest, reg *proxy.CustomRegistry) ([]byte, 
 		}
 	}
 
-	for _, m := range req.Messages {
-		txt := extractText(m.Content)
-		msgs = append(msgs, map[string]any{"role": m.Role, "content": txt})
-	}
+	msgs = append(msgs, translateMessages(req.Messages)...)
 
 	out := map[string]any{
 		"model":    upstreamModel,
@@ -194,6 +403,12 @@ func buildOpenAIBody(req *anthropicRequest, reg *proxy.CustomRegistry) ([]byte, 
 	}
 	if len(req.StopSequences) > 0 {
 		out["stop"] = req.StopSequences
+	}
+	if tools := translateTools(req.Tools); len(tools) > 0 {
+		out["tools"] = tools
+	}
+	if tc := translateToolChoice(req.ToolChoice); tc != nil {
+		out["tool_choice"] = tc
 	}
 
 	buf, err := json.Marshal(out)
@@ -274,7 +489,9 @@ type streamWriter struct {
 	flusher    http.Flusher
 	msgID      string
 	model      string
-	started    bool // message_start + content_block_start already sent
+	started    bool // message_start already sent
+	textOpen   bool // content_block_start for text (index 0) already sent
+	textClosed bool // content_block_stop for text emitted
 	stopped    bool // message_stop already sent
 	finish     string
 	inputToks  int
@@ -282,9 +499,25 @@ type streamWriter struct {
 	textBuf    strings.Builder
 	carry      string // partial line from previous Write
 	errBuf     []byte // upstream error body captured before streaming started
+	// Tool-use tracking. OpenAI streams tool_calls with an `index` field
+	// (0-based within tool_calls array). We map each OpenAI tool_call index
+	// to a distinct Anthropic content_block index (starting at 1, since 0
+	// is reserved for the text block). We buffer arguments per tool so we
+	// can emit input_json_delta as they stream in.
+	toolBlocks map[int]*streamToolBlock
+	nextBlockIdx int // next Anthropic content-block index to assign (starts at 1)
 	// Headers set by the downstream proxy — we don't forward them; we set our own.
 	sinkHeader http.Header
 	statusCode int
+}
+
+// streamToolBlock tracks one in-progress tool_use block.
+type streamToolBlock struct {
+	anthropicIdx int    // content_block index in the Anthropic stream
+	id           string // tool_use id
+	name         string // function name
+	started      bool   // content_block_start emitted
+	closed       bool   // content_block_stop emitted
 }
 
 func newStreamWriter(real gin.ResponseWriter, msgID, model string) *streamWriter {
@@ -295,6 +528,8 @@ func newStreamWriter(real gin.ResponseWriter, msgID, model string) *streamWriter
 		flusher:        fl,
 		msgID:          msgID,
 		model:          model,
+		toolBlocks:     make(map[int]*streamToolBlock),
+		nextBlockIdx:   1, // 0 is reserved for text block
 		sinkHeader:     http.Header{},
 		statusCode:     200,
 	}
@@ -314,7 +549,9 @@ func (w *streamWriter) WriteHeader(code int) {
 	w.statusCode = code
 }
 
-// ensureStart emits message_start + content_block_start on the wire, once.
+// ensureStart emits message_start on the wire, once. The text content_block
+// is opened lazily by ensureTextBlock() when the first text delta arrives;
+// tool_use blocks are opened by ensureToolBlock().
 func (w *streamWriter) ensureStart() {
 	if w.started {
 		return
@@ -344,13 +581,82 @@ func (w *streamWriter) ensureStart() {
 		},
 	}
 	w.emitEvent("message_start", startMsg)
+}
 
-	blockStart := map[string]any{
+// ensureTextBlock emits content_block_start for the text block (index 0)
+// exactly once, right before the first text_delta.
+func (w *streamWriter) ensureTextBlock() {
+	if w.textOpen {
+		return
+	}
+	w.textOpen = true
+	w.emitEvent("content_block_start", map[string]any{
 		"type":          "content_block_start",
 		"index":         0,
 		"content_block": map[string]any{"type": "text", "text": ""},
+	})
+}
+
+// closeTextBlock emits content_block_stop for the text block if it was opened
+// and not already closed. Idempotent.
+func (w *streamWriter) closeTextBlock() {
+	if !w.textOpen || w.textClosed {
+		return
 	}
-	w.emitEvent("content_block_start", blockStart)
+	w.textClosed = true
+	w.emitEvent("content_block_stop", map[string]any{
+		"type":  "content_block_stop",
+		"index": 0,
+	})
+}
+
+// ensureToolBlock returns (and lazily creates) the streamToolBlock for the
+// given OpenAI tool_call index. Emits content_block_start on first sight.
+// id/name may arrive on the first delta or piecemeal — we track whichever
+// arrives first and open the block once we have a name (OpenAI always sends
+// name+id in the first delta of a tool_call).
+func (w *streamWriter) ensureToolBlock(openaiIdx int, id, name string) *streamToolBlock {
+	tb, ok := w.toolBlocks[openaiIdx]
+	if !ok {
+		tb = &streamToolBlock{anthropicIdx: w.nextBlockIdx}
+		w.nextBlockIdx++
+		w.toolBlocks[openaiIdx] = tb
+	}
+	if id != "" && tb.id == "" {
+		tb.id = id
+	}
+	if name != "" && tb.name == "" {
+		tb.name = name
+	}
+	if !tb.started && tb.name != "" {
+		// Before opening a tool block, ensure the text block is closed
+		// (Anthropic requires strictly ordered content blocks).
+		w.closeTextBlock()
+		tb.started = true
+		w.emitEvent("content_block_start", map[string]any{
+			"type":  "content_block_start",
+			"index": tb.anthropicIdx,
+			"content_block": map[string]any{
+				"type":  "tool_use",
+				"id":    tb.id,
+				"name":  tb.name,
+				"input": map[string]any{},
+			},
+		})
+	}
+	return tb
+}
+
+// closeToolBlock emits content_block_stop for a tool block. Idempotent.
+func (w *streamWriter) closeToolBlock(tb *streamToolBlock) {
+	if tb == nil || !tb.started || tb.closed {
+		return
+	}
+	tb.closed = true
+	w.emitEvent("content_block_stop", map[string]any{
+		"type":  "content_block_stop",
+		"index": tb.anthropicIdx,
+	})
 }
 
 // emitEvent writes one Anthropic SSE frame (event: <name>\ndata: <json>\n\n).
@@ -404,8 +710,17 @@ func (w *streamWriter) processLine(line string) {
 	var oc struct {
 		Choices []struct {
 			Delta struct {
-				Content string `json:"content"`
-				Role    string `json:"role"`
+				Content   string `json:"content"`
+				Role      string `json:"role"`
+				ToolCalls []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id,omitempty"`
+					Type     string `json:"type,omitempty"`
+					Function struct {
+						Name      string `json:"name,omitempty"`
+						Arguments string `json:"arguments,omitempty"`
+					} `json:"function"`
+				} `json:"tool_calls,omitempty"`
 			} `json:"delta"`
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
@@ -427,6 +742,7 @@ func (w *streamWriter) processLine(line string) {
 	ch := oc.Choices[0]
 	if ch.Delta.Content != "" {
 		w.ensureStart()
+		w.ensureTextBlock()
 		w.textBuf.WriteString(ch.Delta.Content)
 		w.emitEvent("content_block_delta", map[string]any{
 			"type":  "content_block_delta",
@@ -434,23 +750,59 @@ func (w *streamWriter) processLine(line string) {
 			"delta": map[string]any{"type": "text_delta", "text": ch.Delta.Content},
 		})
 	}
+	// Tool-call deltas. OpenAI streams these piecewise: the first delta
+	// carries id/name, subsequent deltas carry function.arguments chunks.
+	for _, tc := range ch.Delta.ToolCalls {
+		w.ensureStart()
+		tb := w.ensureToolBlock(tc.Index, tc.ID, tc.Function.Name)
+		if tc.Function.Arguments != "" && tb.started {
+			w.emitEvent("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": tb.anthropicIdx,
+				"delta": map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": tc.Function.Arguments,
+				},
+			})
+		}
+	}
 	if ch.FinishReason != nil && *ch.FinishReason != "" {
 		w.finish = *ch.FinishReason
 	}
 }
 
-// finalize emits content_block_stop + message_delta + message_stop.
+// finalize emits content_block_stop for every open block + message_delta + message_stop.
 func (w *streamWriter) finalize() {
 	if w.stopped {
 		return
 	}
 	w.ensureStart() // in case upstream sent no content, still emit shell
+	// If nothing at all was emitted (no text, no tools), open an empty text
+	// block so the client sees a valid single-block message.
+	if !w.textOpen && len(w.toolBlocks) == 0 {
+		w.ensureTextBlock()
+	}
 	w.stopped = true
 
-	w.emitEvent("content_block_stop", map[string]any{
-		"type":  "content_block_stop",
-		"index": 0,
-	})
+	// Close text block first (index 0), then any tool blocks in creation order.
+	w.closeTextBlock()
+	// Iterate tool blocks in ascending anthropicIdx order for deterministic output.
+	// (Range over map is unordered — collect + sort by index.)
+	if len(w.toolBlocks) > 0 {
+		ordered := make([]*streamToolBlock, 0, len(w.toolBlocks))
+		for _, tb := range w.toolBlocks {
+			ordered = append(ordered, tb)
+		}
+		// Simple insertion sort — expected tiny N.
+		for i := 1; i < len(ordered); i++ {
+			for j := i; j > 0 && ordered[j-1].anthropicIdx > ordered[j].anthropicIdx; j-- {
+				ordered[j-1], ordered[j] = ordered[j], ordered[j-1]
+			}
+		}
+		for _, tb := range ordered {
+			w.closeToolBlock(tb)
+		}
+	}
 	w.emitEvent("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
@@ -476,10 +828,13 @@ func (w *streamWriter) Flush() {
 // standard Authorization: Bearer form so the existing auth.AuthMiddleware
 // (already installed on the router) can validate it. Runs BEFORE the main
 // AuthMiddleware in the middleware chain.
+//
+// Applies to any /v1/* path — Anthropic clients call GET /v1/models,
+// POST /v1/messages, etc., all with x-api-key.
 func AnthropicAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Only touch /v1/messages — leave everything else alone.
-		if c.Request.URL.Path != "/v1/messages" {
+		// Only touch /v1/* — leave everything else alone.
+		if !strings.HasPrefix(c.Request.URL.Path, "/v1/") {
 			c.Next()
 			return
 		}
@@ -658,7 +1013,7 @@ func HandleMessages(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyMan
 
 		if outputText == "" || strings.HasSuffix(outputText, "…") {
 			// Try structured parse of the captured body for a full-fidelity string.
-			text, finReason := extractFromCapturedBody(bodyBytes)
+			text, finReason, _ := extractFromCapturedBody(bodyBytes)
 			if text != "" {
 				outputText = text
 			}
@@ -667,12 +1022,56 @@ func HandleMessages(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyMan
 			}
 		}
 
+		// Always parse the captured body for tool_calls — even if
+		// output_text was populated by the proxy, tool_calls aren't.
+		_, finReasonTC, toolCalls := extractFromCapturedBody(bodyBytes)
+		if finish == "" {
+			finish = finReasonTC
+		}
+
+		// Build content blocks: text (if any) first, then tool_use blocks.
+		blocks := make([]anthropicContentBlockOut, 0, 1+len(toolCalls))
+		if outputText != "" {
+			blocks = append(blocks, anthropicContentBlockOut{Type: "text", Text: outputText})
+		}
+		for _, tc := range toolCalls {
+			// arguments is a JSON string; keep it as RawMessage so it emits
+			// as an object (not a string) in the Anthropic response.
+			var input json.RawMessage
+			args := strings.TrimSpace(tc.Function.Arguments)
+			if args == "" {
+				input = json.RawMessage("{}")
+			} else if json.Valid([]byte(args)) {
+				input = json.RawMessage(args)
+			} else {
+				// Malformed args from upstream — pass through as a JSON string.
+				b, _ := json.Marshal(args)
+				input = json.RawMessage(b)
+			}
+			blocks = append(blocks, anthropicContentBlockOut{
+				Type:  "tool_use",
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
+				Input: input,
+			})
+		}
+		// Fallback: ensure at least one content block so the response is
+		// syntactically valid.
+		if len(blocks) == 0 {
+			blocks = append(blocks, anthropicContentBlockOut{Type: "text", Text: ""})
+		}
+		// If a tool call was produced but the upstream didn't emit finish_reason,
+		// map it to tool_use.
+		if len(toolCalls) > 0 && finish == "" {
+			finish = "tool_calls"
+		}
+
 		resp := anthropicResponse{
-			ID:      msgID,
-			Type:    "message",
-			Role:    "assistant",
-			Model:   clientModelName,
-			Content: []anthropicContentBlockOut{{Type: "text", Text: outputText}},
+			ID:         msgID,
+			Type:       "message",
+			Role:       "assistant",
+			Model:      clientModelName,
+			Content:    blocks,
 			StopReason: mapStopReason(finish),
 			Usage: anthropicUsage{
 				InputTokens:  inputToks,
@@ -686,8 +1085,19 @@ func HandleMessages(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyMan
 	}
 }
 
+// openAIToolCallOut mirrors OpenAI's tool_call shape in a non-stream response.
+// Used by extractFromCapturedBody.
+type openAIToolCallOut struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
 // extractFromCapturedBody parses either a JSON chat.completion body OR a
-// buffered SSE stream and returns (text, finish_reason).
+// buffered SSE stream and returns (text, finish_reason, tool_calls).
 // extractUpstreamErrorMessage walks common upstream error JSON shapes and
 // returns a short human-readable message. Falls back to the raw body if it
 // isn't JSON or no known field is found. Avoids embedding JSON strings
@@ -718,9 +1128,9 @@ func extractUpstreamErrorMessage(raw any, bodyBytes []byte) string {
 	return s
 }
 
-func extractFromCapturedBody(b []byte) (string, string) {
+func extractFromCapturedBody(b []byte) (string, string, []openAIToolCallOut) {
 	if len(b) == 0 {
-		return "", ""
+		return "", "", nil
 	}
 	trimmed := bytes.TrimSpace(b)
 	// JSON?
@@ -728,16 +1138,24 @@ func extractFromCapturedBody(b []byte) (string, string) {
 		var r struct {
 			Choices []struct {
 				Message struct {
-					Content string `json:"content"`
+					Content   string              `json:"content"`
+					ToolCalls []openAIToolCallOut `json:"tool_calls,omitempty"`
 				} `json:"message"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal(trimmed, &r); err == nil && len(r.Choices) > 0 {
-			return r.Choices[0].Message.Content, r.Choices[0].FinishReason
+			return r.Choices[0].Message.Content, r.Choices[0].FinishReason, r.Choices[0].Message.ToolCalls
 		}
 	}
-	// SSE stream — scan `data: {...}` lines.
+	// SSE stream — scan `data: {...}` lines. Tool calls in SSE arrive as
+	// piecewise Delta.ToolCalls[i].{id,name,function.arguments}; reassemble.
+	type tcAcc struct {
+		id, name string
+		args     strings.Builder
+	}
+	tcMap := map[int]*tcAcc{}
+	var tcOrder []int
 	var sb strings.Builder
 	var finish string
 	scanner := bufio.NewScanner(bytes.NewReader(b))
@@ -754,10 +1172,19 @@ func extractFromCapturedBody(b []byte) (string, string) {
 		var oc struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content   string `json:"content"`
+					ToolCalls []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id,omitempty"`
+						Function struct {
+							Name      string `json:"name,omitempty"`
+							Arguments string `json:"arguments,omitempty"`
+						} `json:"function"`
+					} `json:"tool_calls,omitempty"`
 				} `json:"delta"`
 				Message *struct {
-					Content string `json:"content"`
+					Content   string              `json:"content"`
+					ToolCalls []openAIToolCallOut `json:"tool_calls,omitempty"`
 				} `json:"message,omitempty"`
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
@@ -772,12 +1199,50 @@ func extractFromCapturedBody(b []byte) (string, string) {
 			sb.WriteString(oc.Choices[0].Delta.Content)
 		} else if oc.Choices[0].Message != nil {
 			sb.WriteString(oc.Choices[0].Message.Content)
+			// A full message block may also carry final tool_calls.
+			for _, tc := range oc.Choices[0].Message.ToolCalls {
+				idx := len(tcOrder)
+				acc := &tcAcc{id: tc.ID, name: tc.Function.Name}
+				acc.args.WriteString(tc.Function.Arguments)
+				tcMap[idx] = acc
+				tcOrder = append(tcOrder, idx)
+			}
+		}
+		for _, tc := range oc.Choices[0].Delta.ToolCalls {
+			acc, ok := tcMap[tc.Index]
+			if !ok {
+				acc = &tcAcc{}
+				tcMap[tc.Index] = acc
+				tcOrder = append(tcOrder, tc.Index)
+			}
+			if tc.ID != "" {
+				acc.id = tc.ID
+			}
+			if tc.Function.Name != "" {
+				acc.name = tc.Function.Name
+			}
+			if tc.Function.Arguments != "" {
+				acc.args.WriteString(tc.Function.Arguments)
+			}
 		}
 		if oc.Choices[0].FinishReason != nil {
 			finish = *oc.Choices[0].FinishReason
 		}
 	}
-	return sb.String(), finish
+	var tcs []openAIToolCallOut
+	for _, idx := range tcOrder {
+		acc := tcMap[idx]
+		if acc == nil {
+			continue
+		}
+		var t openAIToolCallOut
+		t.ID = acc.id
+		t.Type = "function"
+		t.Function.Name = acc.name
+		t.Function.Arguments = acc.args.String()
+		tcs = append(tcs, t)
+	}
+	return sb.String(), finish, tcs
 }
 
 func anyToInt(v any) int {

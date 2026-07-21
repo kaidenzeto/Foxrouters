@@ -184,6 +184,19 @@ func ProxyRequest(grokAM *upstream.GrokAccountManager, cbKM *upstream.CBKeyManag
 					models = append(models, gin.H{"id": "combo/" + c.Name, "object": "model", "owned_by": "foxrouters"})
 				}
 			}
+			// Anthropic clients (Claude Code, anthropic-sdk-*, etc.) probe
+			// GET /v1/models and expect Anthropic-shaped entries. Detect them
+			// by well-known request headers and enrich each entry in-place
+			// with {type, display_name, created_at}. OpenAI fields stay too
+			// so the same response works for both client families.
+			if isAnthropicClient(c) {
+				for i := range models {
+					id, _ := models[i]["id"].(string)
+					models[i]["type"] = "model"
+					models[i]["display_name"] = displayNameForModel(id)
+					models[i]["created_at"] = "2025-01-01T00:00:00Z"
+				}
+			}
 			c.JSON(200, gin.H{"object": "list", "data": models})
 			return
 		}
