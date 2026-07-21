@@ -2,44 +2,36 @@
 # tunnel.sh — Cloudflare Tunnel management for FoxRouters
 #
 # Exposes the local FoxRouters gateway (foxrouters:20130 inside the
-# foxrouters-net Docker network) via a Cloudflare Tunnel. Two modes:
+# foxrouters-net Docker network) via a Cloudflare Tunnel.
 #
-#   quick — random *.trycloudflare.com URL, no Cloudflare account needed.
-#           URL changes on every restart (not persistent).
-#   named — custom domain via a persistent tunnel. Requires a Cloudflare
-#           account, a zone, and a pre-existing cert.pem + tunnel credentials
-#           JSON at /etc/foxrouters/cloudflared/ (see NAMED SETUP below).
+# Three modes:
+#   quick  — random *.trycloudflare.com URL, no account needed.
+#            URL changes on every restart (not persistent).
+#   named  — custom domain via Cloudflare API (auto-configured).
+#            Needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID +
+#            CLOUDFLARE_ZONE_ID + TUNNEL_DOMAIN.
+#            Persistent URL, 1 container, no cert.pem/config.yml needed.
+#   hybrid — BOTH quick + named running simultaneously (2 containers).
 #
 # Usage:
 #   ./tunnel.sh enable [--quick|--named|--hybrid]  Start tunnel(s).
-#                                                  quick: random URL only
-#                                                  named: custom domain only
-#                                                  hybrid: BOTH quick + named
 #   ./tunnel.sh disable                            Stop + remove all tunnel containers.
 #   ./tunnel.sh status                             Show all tunnel states + URLs.
 #   ./tunnel.sh url                                Print all running tunnel URLs.
 #   ./tunnel.sh restart                            Restart (keeps the same mode).
 #   ./tunnel.sh logs [quick|named] [-f]            Tail cloudflared logs.
+#   ./tunnel.sh setup-named                        Interactive named tunnel setup
+#                                                  (prompts for CF creds, saves to env).
 #
-# NAMED SETUP (once, on host):
-#   1. cloudflared tunnel login
-#        → writes ~/.cloudflared/cert.pem
-#   2. cloudflared tunnel create foxrouters
-#        → writes ~/.cloudflared/<tunnel-id>.json
-#   3. Copy both to the shared config dir:
-#        sudo mkdir -p /etc/foxrouters/cloudflared
-#        sudo cp ~/.cloudflared/cert.pem            /etc/foxrouters/cloudflared/
-#        sudo cp ~/.cloudflared/<tunnel-id>.json    /etc/foxrouters/cloudflared/
-#   4. Write /etc/foxrouters/cloudflared/config.yml:
-#        tunnel: <tunnel-id>
-#        credentials-file: /etc/cloudflared/<tunnel-id>.json
-#        ingress:
-#          - hostname: gateway.example.com
-#            service: http://foxrouters:20130
-#          - service: http_status:404
-#   5. cloudflared tunnel route dns foxrouters gateway.example.com
-#   6. ./tunnel.sh enable --named
-#
+# Named tunnel via API (no manual cloudflared login needed):
+#   Requires env vars (or /etc/foxrouters/.env):
+#     CLOUDFLARE_API_TOKEN  — API token with Tunnel:Edit + DNS:Edit perms
+#     CLOUDFLARE_ACCOUNT_ID — account ID (dashboard URL or API)
+#     CLOUDFLARE_ZONE_ID    — zone ID for the domain
+#     TUNNEL_DOMAIN         — e.g. gateway.example.com
+#   The script auto-creates the tunnel, configures ingress, routes DNS,
+#   and starts cloudflared with --token (no cert.pem/credentials JSON).
+
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -49,7 +41,8 @@ IMAGE="cloudflare/cloudflared:latest"
 NETWORK="foxrouters-net"
 UPSTREAM="http://foxrouters:20130"
 CONFIG_DIR="/etc/foxrouters/cloudflared"
-STATE_FILE="${CONFIG_DIR}/mode"   # remembers last-used mode for `restart`
+STATE_FILE="${CONFIG_DIR}/mode"
+ENV_FILE="/etc/foxrouters/.env"
 
 # ── Colors ──────────────────────────────────────────────────────────────────
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -60,6 +53,7 @@ info()   { printf '\033[36m[i]\033[0m %s\n' "$*"; }
 ok()     { printf '\033[32m[✓]\033[0m %s\n' "$*"; }
 err()    { printf '\033[31m[✗]\033[0m %s\n' "$*"; }
 
+# ── Helpers ─────────────────────────────────────────────────────────────────
 need_docker() {
     if ! command -v docker &>/dev/null; then
         err "Docker not found. Install it first."
@@ -101,9 +95,17 @@ load_mode() {
     fi
 }
 
-# Extract the *.trycloudflare.com URL from cloudflared logs. Quick tunnels
-# print a banner like "https://<slug>.trycloudflare.com" once the tunnel is
-# established — polls up to ~30s.
+# Load env vars from .env file if present
+load_env() {
+    if [[ -f "${ENV_FILE}" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        source "${ENV_FILE}" 2>/dev/null || true
+        set +a
+    fi
+}
+
+# Extract the *.trycloudflare.com URL from cloudflared logs.
 capture_quick_url() {
     local c="$1"
     local url=""
@@ -120,6 +122,7 @@ capture_quick_url() {
     return 1
 }
 
+# ── Quick tunnel ────────────────────────────────────────────────────────────
 start_quick() {
     info "Starting quick tunnel → ${UPSTREAM}"
     docker rm -f "${CONTAINER_QUICK}" 2>/dev/null || true
@@ -144,45 +147,240 @@ start_quick() {
     fi
 }
 
-start_named() {
-    info "Starting named tunnel from ${CONFIG_DIR}"
-    if [[ ! -d "${CONFIG_DIR}" ]]; then
-        err "Config dir ${CONFIG_DIR} missing. See NAMED SETUP in tunnel.sh."
+# ── Named tunnel via Cloudflare API ─────────────────────────────────────────
+# Creates tunnel via API, configures ingress, routes DNS, starts container
+# with --token. No cert.pem, credentials JSON, or config.yml needed.
+
+check_cf_creds() {
+    load_env
+    local missing=()
+    [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]  && missing+=("CLOUDFLARE_API_TOKEN")
+    [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]] && missing+=("CLOUDFLARE_ACCOUNT_ID")
+    [[ -z "${CLOUDFLARE_ZONE_ID:-}" ]]    && missing+=("CLOUDFLARE_ZONE_ID")
+    [[ -z "${TUNNEL_DOMAIN:-}" ]]         && missing+=("TUNNEL_DOMAIN")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        err "Missing Cloudflare credentials: ${missing[*]}"
+        echo ""
+        echo "  Set these in ${ENV_FILE} or as env vars:"
+        echo "    CLOUDFLARE_API_TOKEN  — https://dash.cloudflare.com/profile/api-tokens"
+        echo "                           (create token with Tunnel:Edit + DNS:Edit)"
+        echo "    CLOUDFLARE_ACCOUNT_ID — found in dashboard URL or API"
+        echo "    CLOUDFLARE_ZONE_ID    — domain zone ID (dashboard > Overview > right sidebar)"
+        echo "    TUNNEL_DOMAIN         — e.g. gateway.example.com"
+        echo ""
+        echo "  Or run: ./tunnel.sh setup-named  (interactive setup)"
         return 1
     fi
-    if [[ ! -f "${CONFIG_DIR}/config.yml" ]]; then
-        err "${CONFIG_DIR}/config.yml missing. See NAMED SETUP in tunnel.sh."
-        return 1
-    fi
-    if ! ls "${CONFIG_DIR}"/*.json &>/dev/null; then
-        err "No <tunnel-id>.json credentials found in ${CONFIG_DIR}."
-        err "Run 'cloudflared tunnel create foxrouters' and copy the JSON here."
+}
+
+# Create tunnel via API, return connector token
+create_tunnel_via_api() {
+    local tunnel_name="foxrouters"
+    local resp
+    resp=$(curl -s -X POST \
+        "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\":\"${tunnel_name}\",\"tunnel_secret\":\"$(openssl rand -hex 32)\"}" 2>&1)
+
+    if ! echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('success')" 2>/dev/null; then
+        # Check if tunnel already exists
+        local existing
+        existing=$(curl -s "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel?name=${tunnel_name}" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" 2>&1)
+        local tid
+        tid=$(echo "$existing" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if d.get('success') and d.get('result'):
+    print(d['result'][0]['id'])
+" 2>/dev/null || true)
+        if [[ -n "$tid" ]]; then
+            info "Tunnel '${tunnel_name}' already exists (id: ${tid}), reusing."
+            # Get token for existing tunnel
+            local token_resp
+            token_resp=$(curl -s "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${tid}/token" \
+                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" 2>&1)
+            echo "$token_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result'])" 2>/dev/null
+            echo "TUNNEL_ID=${tid}"
+            return 0
+        fi
+        err "Failed to create tunnel: $(echo "$resp" | head -c 200)"
         return 1
     fi
 
+    # Extract tunnel ID + token
+    local tid token
+    tid=$(echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['id'])" 2>/dev/null)
+    token=$(echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result'].get('token',''))" 2>/dev/null)
+
+    if [[ -z "$tid" ]]; then
+        err "Could not parse tunnel ID from API response"
+        return 1
+    fi
+
+    # If no token in create response, fetch it
+    if [[ -z "$token" ]]; then
+        token=$(curl -s "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${tid}/token" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" 2>&1 \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result'])" 2>/dev/null)
+    fi
+
+    echo "$token"
+    echo "TUNNEL_ID=${tid}"
+}
+
+# Configure ingress rules for tunnel
+configure_tunnel_ingress() {
+    local tid="$1"
+    local domain="$2"
+    local resp
+    resp=$(curl -s -X PUT \
+        "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${tid}/configurations" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"config\": {
+                \"ingress\": [
+                    {\"hostname\": \"${domain}\", \"service\": \"${UPSTREAM}\"},
+                    {\"service\": \"http_status:404\"}
+                ]
+            }
+        }" 2>&1)
+
+    if ! echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('success')" 2>/dev/null; then
+        err "Failed to configure ingress: $(echo "$resp" | head -c 200)"
+        return 1
+    fi
+    ok "Ingress configured: ${domain} → ${UPSTREAM}"
+}
+
+# Route DNS CNAME to tunnel
+route_dns() {
+    local tid="$1"
+    local domain="$2"
+    # Check if DNS record already exists
+    local existing
+    existing=$(curl -s "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/dns_records?name=${domain}" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" 2>&1)
+
+    local record_id
+    record_id=$(echo "$existing" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if d.get('success') and d.get('result'):
+    print(d['result'][0]['id'])
+" 2>/dev/null || true)
+
+    local cname_target="${tid}.cfargotunnel.com"
+    if [[ -n "$record_id" ]]; then
+        # Update existing
+        curl -s -X PUT \
+            "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/dns_records/${record_id}" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"type\":\"CNAME\",\"name\":\"${domain}\",\"content\":\"${cname_target}\",\"proxied\":true}" >/dev/null 2>&1
+        ok "DNS updated: ${domain} → ${cname_target}"
+    else
+        # Create new
+        curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/dns_records" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"type\":\"CNAME\",\"name\":\"${domain}\",\"content\":\"${cname_target}\",\"proxied\":true}" >/dev/null 2>&1
+        ok "DNS created: ${domain} → ${cname_target}"
+    fi
+}
+
+start_named() {
+    load_env
+    check_cf_creds || return 1
+
+    info "Setting up named tunnel via Cloudflare API..."
+
+    # Create tunnel (or reuse existing)
+    local api_output
+    api_output=$(create_tunnel_via_api) || return 1
+    local token tid
+    token=$(echo "$api_output" | head -1)
+    tid=$(echo "$api_output" | grep '^TUNNEL_ID=' | cut -d= -f2)
+
+    if [[ -z "$token" || -z "$tid" ]]; then
+        err "Failed to get tunnel token or ID"
+        return 1
+    fi
+    ok "Tunnel ready (id: ${tid})"
+
+    # Configure ingress
+    configure_tunnel_ingress "$tid" "${TUNNEL_DOMAIN}" || return 1
+
+    # Route DNS
+    route_dns "$tid" "${TUNNEL_DOMAIN}" || return 1
+
+    # Save token for restarts
+    echo "$token" > "${CONFIG_DIR}/named_token" 2>/dev/null || true
+    chmod 600 "${CONFIG_DIR}/named_token" 2>/dev/null || true
+
+    # Start container with --token (1 container, no cert.pem/config.yml)
+    info "Starting named tunnel container..."
     docker rm -f "${CONTAINER_NAMED}" 2>/dev/null || true
     docker run -d \
         --name "${CONTAINER_NAMED}" \
         --network "${NETWORK}" \
         --restart unless-stopped \
-        -v "${CONFIG_DIR}:/etc/cloudflared:ro" \
         "${IMAGE}" \
-        tunnel --no-autoupdate --config /etc/cloudflared/config.yml run >/dev/null
+        tunnel --no-autoupdate --token "${token}" >/dev/null
     ok "Container '${CONTAINER_NAMED}' started (named mode)"
 
-    # Best-effort: pull the hostname out of config.yml so the user sees the URL
-    # without hunting through cloudflared logs.
-    HOSTNAME=$(grep -E '^\s*-?\s*hostname:' "${CONFIG_DIR}/config.yml" \
-               | head -1 | awk -F: '{print $2}' | tr -d ' ' || true)
-    if [[ -n "${HOSTNAME}" ]]; then
-        echo ""
-        bold "  Named Tunnel URL: https://${HOSTNAME}"
-        echo ""
-    else
-        info "Named tunnel started. Check the hostname(s) in ${CONFIG_DIR}/config.yml"
-    fi
+    echo ""
+    bold "  Named Tunnel URL: https://${TUNNEL_DOMAIN}"
+    echo ""
+    green "  ✓ Persistent URL — survives restarts"
+    green "  ✓ TLS automatic — Cloudflare handles certs"
+    echo ""
 }
 
+# ── Interactive named setup ─────────────────────────────────────────────────
+cmd_setup_named() {
+    echo ""
+    bold "Cloudflare Named Tunnel Setup"
+    echo "  This will auto-create a tunnel via Cloudflare API."
+    echo "  You need: API token, Account ID, Zone ID, and domain."
+    echo ""
+
+    load_env
+
+    # Prompt for missing values
+    local cf_token cf_account cf_zone cf_domain
+    cf_token="${CLOUDFLARE_API_TOKEN:-}"
+    cf_account="${CLOUDFLARE_ACCOUNT_ID:-}"
+    cf_zone="${CLOUDFLARE_ZONE_ID:-}"
+    cf_domain="${TUNNEL_DOMAIN:-}"
+
+    [[ -z "$cf_token" ]]  && read -r -p "Cloudflare API Token: " cf_token
+    [[ -z "$cf_account" ]] && read -r -p "Account ID: " cf_account
+    [[ -z "$cf_zone" ]]    && read -r -p "Zone ID: " cf_zone
+    [[ -z "$cf_domain" ]]  && read -r -p "Domain (e.g. gateway.example.com): " cf_domain
+
+    # Save to .env
+    info "Saving credentials to ${ENV_FILE}..."
+    # Remove old entries
+    sed -i '/^CLOUDFLARE_API_TOKEN=/d; /^CLOUDFLARE_ACCOUNT_ID=/d; /^CLOUDFLARE_ZONE_ID=/d; /^TUNNEL_DOMAIN=/d' "${ENV_FILE}" 2>/dev/null || true
+    cat >> "${ENV_FILE}" << EOF
+CLOUDFLARE_API_TOKEN=${cf_token}
+CLOUDFLARE_ACCOUNT_ID=${cf_account}
+CLOUDFLARE_ZONE_ID=${cf_zone}
+TUNNEL_DOMAIN=${cf_domain}
+EOF
+    chmod 600 "${ENV_FILE}"
+    ok "Credentials saved."
+
+    echo ""
+    info "Now run: ./tunnel.sh enable --named"
+    echo ""
+}
+
+# ── Commands ────────────────────────────────────────────────────────────────
 cmd_enable() {
     need_docker
     ensure_network
@@ -259,13 +457,9 @@ cmd_status() {
             green "Named Tunnel: RUNNING"
             docker ps --filter "name=^/${CONTAINER_NAMED}$" \
                 --format '  container: {{.Names}}   status: {{.Status}}'
-            if [[ -f "${CONFIG_DIR}/config.yml" ]]; then
-                local host
-                host=$(grep -E '^\s*-?\s*hostname:' "${CONFIG_DIR}/config.yml" \
-                       | head -1 | awk -F: '{print $2}' | tr -d ' ')
-                if [[ -n "${host}" ]]; then
-                    echo "  URL: https://${host}"
-                fi
+            load_env
+            if [[ -n "${TUNNEL_DOMAIN:-}" ]]; then
+                echo "  URL: https://${TUNNEL_DOMAIN}"
             fi
         else
             yellow "Named Tunnel: STOPPED"
@@ -296,14 +490,10 @@ cmd_url() {
 
     # Named tunnel URL
     if exists "${CONTAINER_NAMED}" && is_running "${CONTAINER_NAMED}"; then
-        if [[ -f "${CONFIG_DIR}/config.yml" ]]; then
-            local host
-            host=$(grep -E '^\s*-?\s*hostname:' "${CONFIG_DIR}/config.yml" \
-                   | head -1 | awk -F: '{print $2}' | tr -d ' ')
-            if [[ -n "${host}" ]]; then
-                echo "named: https://${host}"
-                found=1
-            fi
+        load_env
+        if [[ -n "${TUNNEL_DOMAIN:-}" ]]; then
+            echo "named: https://${TUNNEL_DOMAIN}"
+            found=1
         fi
     fi
 
@@ -347,7 +537,6 @@ cmd_logs() {
             docker logs ${follow} --tail 100 "${CONTAINER_NAMED}"
             ;;
         "")
-            # Show both if they exist
             local shown=0
             for c in "${CONTAINER_QUICK}" "${CONTAINER_NAMED}"; do
                 if exists "$c"; then
@@ -367,18 +556,19 @@ cmd_logs() {
 }
 
 usage() {
-    sed -n '2,28p' "$0"
+    sed -n '2,33p' "$0"
     exit 1
 }
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
 case "${1:-}" in
-    enable)  shift; cmd_enable  "${1:-}" ;;
-    disable) cmd_disable ;;
-    status)  cmd_status ;;
-    url)     cmd_url ;;
-    restart) cmd_restart ;;
-    logs)    shift; cmd_logs "${1:-}" "${2:-}" ;;
+    enable)      shift; cmd_enable  "${1:-}" ;;
+    disable)     cmd_disable ;;
+    status)      cmd_status ;;
+    url)         cmd_url ;;
+    restart)     cmd_restart ;;
+    logs)        shift; cmd_logs "${1:-}" "${2:-}" ;;
+    setup-named) cmd_setup_named ;;
     -h|--help|help|"") usage ;;
     *) err "Unknown command: $1"; usage ;;
 esac
