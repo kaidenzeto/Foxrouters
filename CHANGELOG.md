@@ -2,9 +2,44 @@
 
 **Service:** `foxrouters.service` · port **20130** · binary `foxrouters`  
 **Repo:** `/root/nexus-workspace/foxrouters/`  
-**Live version:** `const Version` in `main.go` (currently **v1.5.0**)
+**Live version:** `const Version` in `main.go` (currently **v1.6.0**)
 
 Policy: **test (`go test -race`) before build/restart**. Secrets only via `.gateway.env` (gitignored).
+
+---
+
+## v1.6.0 — SQLite Default + Cloudflare Tunnel + Anthropic Tools + CB Disable Guards (2026-07-21)
+
+### ⚠️ Breaking Change
+
+**Default log backend changed from ClickHouse to SQLite.** Existing ClickHouse users must set `LOG_BACKEND=clickhouse` in `.env` before upgrading. The installer auto-detects existing ClickHouse installs (via `.env` or running container) and preserves the setting.
+
+### Added
+
+| Feature | Description |
+|---------|-------------|
+| **SQLite log backend (default)** | `modernc.org/sqlite` (pure Go, no CGO). `LOG_BACKEND=sqlite` (default) → single file at `LOG_SQLITE_PATH`, ~9 MiB RAM. `LOG_BACKEND=clickhouse` still fully supported. `NewLogStore()` factory switches on env. |
+| **Cloudflare Tunnel — first-class Go feature** | `internal/tunnel/manager.go` with `cloudflare-go/v7` SDK for named tunnel management (control plane). Embedded `cloudflared` binary (data plane). 1 container for gateway + tunnel. Dashboard UI: Tunnel page with enable/disable + config modal. API: `/api/tunnel/{status,enable,disable,restart}`. Redis: `fr:tunnel:config` for persistence. Auto-start on boot. Modes: quick (random URL), named (custom domain), hybrid (both). |
+| **Anthropic Messages API tool calling** | Full bidirectional tool translation on `POST /v1/messages`. Request: Anthropic `tools`/`tool_choice`/`tool_result` → OpenAI `tools`/`tool_choice`/`role:tool`. Response (stream + non-stream): OpenAI `tool_calls` → Anthropic `tool_use` blocks with `input_json_delta`. |
+| **Anthropic model list fix** | `AnthropicAuthMiddleware` now covers all `/v1/*` paths (was `/v1/messages` only) — `x-api-key` accepted for `/v1/models`. `/v1/models` detects Anthropic clients and adds `display_name`, `created_at`, `type` fields alongside OpenAI fields. |
+| **CB key disable guards** | 429 code 14017 (trial not activated) → permanent disable. 403 code 11140 (request illegal/banned) → permanent disable. Matching existing 401 and 14018 (credits exhausted) permanent disable behavior. |
+
+### Fixed
+
+| Fix | Description |
+|-----|-------------|
+| **Tunnel named modal CSS** | `.modal-overlay` used `.show` class but JS added `.active` → added `.active` to display rule. |
+| **Installer auto-detection** | `install.sh` detects existing ClickHouse config/container and auto-sets `LOG_BACKEND=clickhouse` (upgrade safety). |
+
+### Tunnel modes
+
+| Mode | URL | Persistent? | Needs CF account? |
+|------|-----|-------------|-------------------|
+| quick | random `*.trycloudflare.com` | no | no |
+| named | `gateway.example.com` | yes | yes (API token + account/zone ID) |
+| hybrid | both simultaneously | quick=no, named=yes | yes for named |
+
+Named tunnel is fully automated via Cloudflare API — no manual `cloudflared login` or cert.pem. User provides API token + account ID + zone ID + domain via dashboard form.
 
 ---
 

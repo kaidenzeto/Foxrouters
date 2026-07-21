@@ -83,11 +83,19 @@ fi
 # ── Step 2: Prompt for log backend ──────────────────────────────────────────
 # Priority:
 #   1. LOG_BACKEND env var (non-interactive install)
-#   2. Interactive prompt (only if stdin is a TTY)
-#   3. Default: sqlite
+#   2. Auto-detect existing ClickHouse install (upgrade safety)
+#   3. Interactive prompt (only if stdin is a TTY)
+#   4. Default: sqlite
 LOG_BACKEND="${LOG_BACKEND:-}"
 if [[ -z "${LOG_BACKEND}" ]]; then
-    if [[ -t 0 ]]; then
+    # Auto-detect: existing .env with LOG_BACKEND=clickhouse OR running CH container
+    if [[ -f "${CONFIG_DIR}/.env" ]] && grep -q '^LOG_BACKEND=clickhouse' "${CONFIG_DIR}/.env" 2>/dev/null; then
+        LOG_BACKEND="clickhouse"
+        info "Auto-detected existing ClickHouse config — keeping LOG_BACKEND=clickhouse"
+    elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q 'foxrouters-clickhouse'; then
+        LOG_BACKEND="clickhouse"
+        info "Auto-detected existing ClickHouse container — using LOG_BACKEND=clickhouse"
+    elif [[ -t 0 ]]; then
         echo ""
         bold "Log backend"
         echo "  [1] SQLite     (default, lightweight, ~0 ops cost — recommended)"
