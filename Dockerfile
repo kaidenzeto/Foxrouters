@@ -36,11 +36,16 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.Version=${VERSION}" -o foxrou
 FROM alpine:3.20 AS cloudflared
 
 ARG CLOUDFLARED_VERSION=2025.11.1
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 RUN apk add --no-cache curl \
+ && case "${TARGETARCH}" in \
+      amd64) CF_ARCH="amd64" ;; \
+      arm64|aarch64) CF_ARCH="arm64" ;; \
+      *) echo "unsupported arch: ${TARGETARCH}"; exit 1 ;; \
+    esac \
  && curl -fsSL -o /usr/local/bin/cloudflared \
-      "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TARGETARCH}" \
+      "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${CF_ARCH}" \
  && chmod +x /usr/local/bin/cloudflared \
  && /usr/local/bin/cloudflared --version
 
