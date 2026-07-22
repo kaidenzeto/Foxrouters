@@ -673,7 +673,7 @@ body {
   padding: 40px 20px;
 }
 
-.modal-overlay.show { display: flex; }
+.modal-overlay.show, .modal-overlay.active { display: flex; }
 
 .modal-box {
   max-width: 860px;
@@ -940,6 +940,10 @@ body {
     <button class="nav-item" data-route="#/proxies" onclick="navigateTo('#/proxies')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
       Proxies
+    </button>
+    <button class="nav-item" data-route="#/tunnel" onclick="navigateTo('#/tunnel')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-8 10-8 10 8 10 8-3 8-10 8S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+      Tunnel
     </button>
   </nav>
   <div class="sidebar-footer">
@@ -1589,6 +1593,124 @@ body {
       </div>
     </div>
 
+    <!-- ════════ PAGE 6: TUNNEL (v1.6.0) ════════ -->
+    <div class="page" id="page-tunnel">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Mode</div>
+          <div class="stat-value" id="tunModeVal" style="font-size:20px">—</div>
+          <div class="stat-sub" id="tunModeSub">off · click Enable to start</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Quick Tunnel</div>
+          <div class="stat-value" id="tunQuickVal" style="font-size:20px">—</div>
+          <div class="stat-sub" id="tunQuickSub">ephemeral trycloudflare.com</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Named Tunnel</div>
+          <div class="stat-value" id="tunNamedVal" style="font-size:20px">—</div>
+          <div class="stat-sub" id="tunNamedSub">persistent custom domain</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Upstream</div>
+          <div class="stat-value" id="tunUpstreamVal" style="font-size:14px;font-family:var(--mono)">—</div>
+          <div class="stat-sub">cloudflared → gateway</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-8 10-8 10 8 10 8-3 8-10 8S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+          <h3>Cloudflare Tunnel</h3>
+          <span class="head-meta" id="tunPanelMeta">SDK-driven · embedded cloudflared</span>
+          <div style="margin-left:auto;display:flex;gap:8px">
+            <button class="btn-ghost" onclick="loadTunnelStatus()" style="padding:6px 12px;font-size:12px">Refresh</button>
+            <button class="btn-ghost" onclick="tunnelRestart()" style="padding:6px 12px;font-size:12px">Restart</button>
+            <button class="btn-ghost" onclick="tunnelDisable()" style="padding:6px 12px;font-size:12px;color:var(--red)">Disable</button>
+          </div>
+        </div>
+
+        <div style="padding:16px;display:grid;gap:14px">
+          <!-- Quick actions row -->
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <span style="font-size:12px;color:var(--text-tertiary)">Enable:</span>
+            <button class="btn-primary" onclick="tunnelEnableQuick()" style="padding:6px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">Quick</button>
+            <button class="btn-primary" onclick="showTunnelNamedModal(false)" style="padding:6px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">Named…</button>
+            <button class="btn-primary" onclick="showTunnelNamedModal(true)" style="padding:6px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">Hybrid…</button>
+            <span id="tunActionResult" style="font-size:12px;color:var(--text-tertiary);margin-left:auto"></span>
+          </div>
+
+          <!-- URLs / status row -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div style="background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:12px">
+              <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px">Quick URL</div>
+              <div id="tunQuickURL" style="font-size:13px;font-family:var(--mono);color:var(--emerald);word-break:break-all">—</div>
+            </div>
+            <div style="background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:12px">
+              <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px">Named Domain</div>
+              <div id="tunNamedURL" style="font-size:13px;font-family:var(--mono);color:var(--emerald);word-break:break-all">—</div>
+            </div>
+          </div>
+
+          <!-- Credentials summary -->
+          <div style="background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:12px">
+            <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:8px">Cloudflare Credentials (stored in Redis, never displayed)</div>
+            <div id="tunCredSummary" style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px">—</div>
+          </div>
+        </div>
+
+        <!-- Logs -->
+        <div style="border-top:1px solid var(--border-strong);padding:12px 16px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:11px;color:var(--text-tertiary)">Recent cloudflared logs (last 400 lines per subprocess)</span>
+            <span id="tunLogsMeta" style="font-size:11px;color:var(--text-tertiary)"></span>
+          </div>
+          <pre id="tunLogs" style="max-height:220px;overflow:auto;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:10px;font-family:var(--mono);font-size:11px;color:var(--text-secondary);margin:0;white-space:pre-wrap;word-break:break-word">no output yet</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════ TUNNEL NAMED CONFIG MODAL ════════ -->
+    <div class="modal-overlay" id="tunnelNamedModal" onclick="if(event.target===this)closeTunnelNamedModal()">
+      <div class="modal-box" style="max-width:560px">
+        <div class="modal-head">
+          <h3 id="tunnelNamedModalTitle">Named Tunnel — Cloudflare Credentials</h3>
+          <button class="modal-close" onclick="closeTunnelNamedModal()">×</button>
+        </div>
+        <div style="padding:16px;display:grid;gap:12px">
+          <div style="font-size:12px;color:var(--text-tertiary);line-height:1.5">
+            The gateway creates the tunnel + configures ingress + routes DNS via the Cloudflare API,
+            then runs <code>cloudflared</code> as a child process. Empty fields keep the current
+            Redis value, so you can flip modes without re-entering credentials.
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">API Token <span style="color:var(--red)">*</span></label>
+            <input type="password" id="tunAPIToken" placeholder="Tunnel:Edit + DNS:Edit scope" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--mono)" />
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Account ID <span style="color:var(--red)">*</span></label>
+              <input type="text" id="tunAccountID" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--mono)" />
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Zone ID <span style="color:var(--red)">*</span></label>
+              <input type="text" id="tunZoneID" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--mono)" />
+            </div>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:4px">Hostname <span style="color:var(--red)">*</span></label>
+            <input type="text" id="tunDomain" placeholder="gateway.example.com" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--mono)" />
+          </div>
+          <input type="hidden" id="tunModalMode" value="named" />
+          <div id="tunModalError" style="display:none;color:var(--red);font-size:12px;padding:6px 10px;background:rgba(255,80,80,0.08);border-radius:var(--radius-sm)"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+            <button class="btn-ghost" onclick="closeTunnelNamedModal()" style="padding:8px 14px;font-size:12px">Cancel</button>
+            <button class="btn-primary" onclick="tunnelEnableNamed()" style="padding:8px 14px;border-radius:var(--radius-sm);background:var(--brand);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer">Enable</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /content -->
 
   <div class="footer-bar" id="footerUpdate" style="padding:0 28px 16px"></div>
@@ -1700,7 +1822,8 @@ var routes = {
   '#/accounts': { page: 'page-accounts',  title: 'Accounts & Keys', meta: 'Live · auto-refresh 5s' },
   '#/keys':     { page: 'page-keys',      title: 'Gateway API Keys', meta: 'Redis-backed · CRUD' },
   '#/models':   { page: 'page-models',    title: 'Models', meta: 'Usage stats · aliases · custom · combos' },
-  '#/proxies':  { page: 'page-proxies',   title: 'Proxies', meta: 'HTTP/SOCKS5 upstream proxy pool · round-robin' }
+  '#/proxies':  { page: 'page-proxies',   title: 'Proxies', meta: 'HTTP/SOCKS5 upstream proxy pool · round-robin' },
+  '#/tunnel':   { page: 'page-tunnel',    title: 'Tunnel', meta: 'Cloudflare Tunnel · embedded cloudflared · Redis config' }
 };
 
 function navigateTo(hash) {
@@ -1740,6 +1863,14 @@ function router() {
   }
   if (hash === '#/proxies') {
     if (typeof loadProxies === 'function') loadProxies();
+  }
+  if (hash === '#/tunnel') {
+    if (typeof loadTunnelStatus === 'function') {
+      loadTunnelStatus();
+      startTunnelPolling();
+    }
+  } else {
+    if (typeof stopTunnelPolling === 'function') stopTunnelPolling();
   }
 }
 
@@ -3725,6 +3856,166 @@ async function saveEditProxy() {
     if (e.message === '__redirect__') return;
     errBox.textContent = 'Save failed: ' + e.message;
     errBox.style.display = 'block';
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
+   TUNNEL (v1.6.0) — Cloudflare Tunnel management.
+   Backed by /api/tunnel/{status,enable,disable,restart}.
+   ══════════════════════════════════════════════════════════ */
+window._tunnelPollTimer = null;
+
+function startTunnelPolling() {
+  if (window._tunnelPollTimer) return;
+  window._tunnelPollTimer = setInterval(function(){
+    if (window.location.hash === '#/tunnel') loadTunnelStatus();
+  }, 5000);
+}
+function stopTunnelPolling() {
+  if (window._tunnelPollTimer) {
+    clearInterval(window._tunnelPollTimer);
+    window._tunnelPollTimer = null;
+  }
+}
+
+async function loadTunnelStatus() {
+  try {
+    var data = await apiFetch('/api/tunnel/status');
+    var st = data && data.status ? data.status : data;
+    renderTunnelStatus(st);
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    document.getElementById('tunLogs').textContent = 'Status load failed: ' + e.message;
+  }
+}
+
+function renderTunnelStatus(st) {
+  if (!st) return;
+  document.getElementById('tunModeVal').textContent = st.mode || 'none';
+  document.getElementById('tunModeSub').textContent =
+    (st.mode === 'none' || !st.mode) ? 'off · click Enable to start' :
+    (st.mode + ' · updated ' + (st.updated_at ? new Date(st.updated_at*1000).toLocaleTimeString() : '—'));
+
+  document.getElementById('tunQuickVal').textContent = st.quick_running ? 'RUNNING' : 'stopped';
+  document.getElementById('tunQuickVal').style.color = st.quick_running ? 'var(--emerald)' : 'var(--text-tertiary)';
+  document.getElementById('tunNamedVal').textContent = st.named_running ? 'RUNNING' : 'stopped';
+  document.getElementById('tunNamedVal').style.color = st.named_running ? 'var(--emerald)' : 'var(--text-tertiary)';
+  document.getElementById('tunUpstreamVal').textContent = st.upstream_url || '—';
+
+  document.getElementById('tunQuickURL').textContent = st.quick_url || '—';
+  document.getElementById('tunNamedURL').textContent = st.tunnel_domain ? ('https://' + st.tunnel_domain) : '—';
+
+  // Credentials summary — only booleans, so we never echo secrets.
+  var cred = document.getElementById('tunCredSummary');
+  cred.innerHTML =
+    tunCredBadge('API Token', st.has_api_token) +
+    tunCredBadge('Account ID', st.has_account_id) +
+    tunCredBadge('Zone ID', st.has_zone_id) +
+    tunCredBadge('Hostname', !!st.tunnel_domain) +
+    (st.tunnel_id ? '<span style="color:var(--text-tertiary);font-family:var(--mono);font-size:11px">tunnel_id: ' + escHtml(st.tunnel_id) + '</span>' : '');
+
+  var logs = (st.logs && st.logs.length) ? st.logs.join('\n') : 'no output yet';
+  document.getElementById('tunLogs').textContent = logs;
+  document.getElementById('tunLogsMeta').textContent = st.logs ? (st.logs.length + ' lines') : '';
+}
+
+function tunCredBadge(label, present) {
+  var col = present ? 'var(--emerald)' : 'var(--text-tertiary)';
+  var dot = present ? '●' : '○';
+  return '<span style="color:' + col + '">' + dot + ' ' + escHtml(label) + '</span>';
+}
+
+async function tunnelEnableQuick() {
+  await tunnelEnable({mode: 'quick'});
+}
+
+function showTunnelNamedModal(hybrid) {
+  document.getElementById('tunModalMode').value = hybrid ? 'hybrid' : 'named';
+  document.getElementById('tunnelNamedModalTitle').textContent =
+    hybrid ? 'Hybrid Tunnel (Quick + Named) — Cloudflare Credentials'
+           : 'Named Tunnel — Cloudflare Credentials';
+  document.getElementById('tunAPIToken').value = '';
+  document.getElementById('tunAccountID').value = '';
+  document.getElementById('tunZoneID').value = '';
+  document.getElementById('tunDomain').value = '';
+  document.getElementById('tunModalError').style.display = 'none';
+  document.getElementById('tunnelNamedModal').classList.add('active');
+}
+function closeTunnelNamedModal() {
+  document.getElementById('tunnelNamedModal').classList.remove('active');
+}
+
+async function tunnelEnableNamed() {
+  var mode = document.getElementById('tunModalMode').value || 'named';
+  var body = {
+    mode: mode,
+    cloudflare_api_token: document.getElementById('tunAPIToken').value.trim(),
+    cloudflare_account_id: document.getElementById('tunAccountID').value.trim(),
+    cloudflare_zone_id: document.getElementById('tunZoneID').value.trim(),
+    tunnel_domain: document.getElementById('tunDomain').value.trim()
+  };
+  var errBox = document.getElementById('tunModalError');
+  errBox.style.display = 'none';
+  try {
+    await tunnelEnable(body);
+    closeTunnelNamedModal();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    errBox.textContent = 'Enable failed: ' + e.message;
+    errBox.style.display = 'block';
+  }
+}
+
+async function tunnelEnable(body) {
+  var meta = document.getElementById('tunActionResult');
+  meta.textContent = 'Enabling…';
+  try {
+    var data = await apiFetch('/api/tunnel/enable', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify(body || {})
+    });
+    meta.textContent = 'Enabled · ' + (body.mode || 'quick');
+    setTimeout(function(){ meta.textContent = ''; }, 4000);
+    if (data && data.status) renderTunnelStatus(data.status);
+    else loadTunnelStatus();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    meta.textContent = 'Enable failed: ' + e.message;
+    meta.style.color = 'var(--red)';
+    setTimeout(function(){ meta.style.color = 'var(--text-tertiary)'; meta.textContent = ''; }, 6000);
+    throw e;
+  }
+}
+
+async function tunnelDisable() {
+  if (!confirm('Disable Cloudflare Tunnel? cloudflared subprocesses will stop.')) return;
+  var meta = document.getElementById('tunActionResult');
+  meta.textContent = 'Disabling…';
+  try {
+    var data = await apiFetch('/api/tunnel/disable', {method:'POST', headers:{'content-type':'application/json'}, body:'{}'});
+    meta.textContent = 'Disabled';
+    setTimeout(function(){ meta.textContent = ''; }, 4000);
+    if (data && data.status) renderTunnelStatus(data.status);
+    else loadTunnelStatus();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    meta.textContent = 'Disable failed: ' + e.message;
+  }
+}
+
+async function tunnelRestart() {
+  var meta = document.getElementById('tunActionResult');
+  meta.textContent = 'Restarting…';
+  try {
+    var data = await apiFetch('/api/tunnel/restart', {method:'POST', headers:{'content-type':'application/json'}, body:'{}'});
+    meta.textContent = 'Restarted';
+    setTimeout(function(){ meta.textContent = ''; }, 4000);
+    if (data && data.status) renderTunnelStatus(data.status);
+    else loadTunnelStatus();
+  } catch (e) {
+    if (e.message === '__redirect__') return;
+    meta.textContent = 'Restart failed: ' + e.message;
   }
 }
 </script>

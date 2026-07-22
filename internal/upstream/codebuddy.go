@@ -477,13 +477,21 @@ func ProxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 		markProxyResult(proxyID, nil, resp.StatusCode)
 
 		if resp.StatusCode == 401 || resp.StatusCode == 429 {
+			// Read body for 429 to distinguish trial-not-activated (14017) from rate limit.
+			var bodyStr string
+			if resp.StatusCode == 429 {
+				bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				bodyStr = string(bodyBytes)
+			}
 			resp.Body.Close()
 			key.mu.Lock()
 			key.disabled = true
 			if resp.StatusCode == 401 {
-				key.disabledAt = time.Time{}
+				key.disabledAt = time.Time{} // permanent
+			} else if strings.Contains(bodyStr, "14017") {
+				key.disabledAt = time.Time{} // permanent — trial not activated, cooldown won't fix
 			} else {
-				key.disabledAt = time.Now()
+				key.disabledAt = time.Now() // 10m cooldown for normal 429
 			}
 			kKey := key.Key
 			credits := key.creditsUsed
@@ -496,6 +504,8 @@ func ProxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 			}
 			if resp.StatusCode == 401 {
 				slog.Warn("key disabled (401 unauthorized, permanent)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
+			} else if strings.Contains(bodyStr, "14017") {
+				slog.Warn("key disabled (429 trial not activated, permanent)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
 			} else {
 				slog.Warn("key disabled (429 rate limited, cooldown 10m)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
 			}
@@ -506,6 +516,23 @@ func ProxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			bodyStr := string(bodyBytes)
+			// 403 with code 11140 = "request illegal" (banned/flagged key) → permanent disable
+			if resp.StatusCode == 403 && strings.Contains(bodyStr, "11140") {
+				key.mu.Lock()
+				key.disabled = true
+				key.disabledAt = time.Time{} // permanent — banned by CodeBuddy
+				kKey := key.Key
+				credits := key.creditsUsed
+				reqs := key.totalReqs
+				disabled := key.disabled
+				disabledAt := key.disabledAt
+				key.mu.Unlock()
+				if key.db != nil {
+					saveCBKey(key.db, kKey, credits, reqs, disabled, disabledAt)
+				}
+				slog.Warn("key disabled (403 request illegal, banned, permanent)", "module", "cb", "key", key.Key[:8]+"..."+key.Key[len(key.Key)-4:])
+				continue
+			}
 			if strings.Contains(bodyStr, "14018") || strings.Contains(bodyStr, "Credits exhausted") {
 				key.mu.Lock()
 				key.disabled = true
@@ -628,6 +655,20 @@ func ProxyCodeBuddy(c *gin.Context, body []byte, bodyMap map[string]any, km *CBK
 									saveCBKey(lastKey.db, lkKey, lkCredits, lkReqs, lkDisabled, lkDisabledAt)
 								}
 								slog.Warn("key disabled (credits exhausted in stream)", "module", "cb", "key", lastKey.Key[:8]+"..."+lastKey.Key[len(lastKey.Key)-4:])
+							} else if strings.Contains(errStr, "14017") {
+								lastKey.mu.Lock()
+								lastKey.disabled = true
+								lastKey.disabledAt = time.Time{} // permanent — trial not activated
+								lkKey := lastKey.Key
+								lkCredits := lastKey.creditsUsed
+								lkReqs := lastKey.totalReqs
+								lkDisabled := lastKey.disabled
+								lkDisabledAt := lastKey.disabledAt
+								lastKey.mu.Unlock()
+								if lastKey.db != nil {
+									saveCBKey(lastKey.db, lkKey, lkCredits, lkReqs, lkDisabled, lkDisabledAt)
+								}
+								slog.Warn("key disabled (trial not activated in stream, permanent)", "module", "cb", "key", lastKey.Key[:8]+"..."+lastKey.Key[len(lastKey.Key)-4:])
 							}
 						}
 						if sc.Usage != nil {

@@ -1,9 +1,23 @@
-# FoxRouters — full stack (Redis + ClickHouse + gateway)
+# FoxRouters — full stack
 # Usage:
 #   cp .env.example .env    # then edit .env with real values
-#   docker compose up -d --build   # one-command deploy
 #
-# The gateway waits for Redis + ClickHouse to be healthy before starting.
+# Default log backend (LOG_BACKEND=sqlite) — lightweight, only Redis + gateway:
+#   docker compose up -d --build
+#
+# ClickHouse mode (LOG_BACKEND=clickhouse) — analytics + full-text queries:
+#   LOG_BACKEND=clickhouse docker compose --profile clickhouse up -d --build
+#
+# Cloudflare Tunnel (quick mode, random *.trycloudflare.com URL):
+#   docker compose --profile tunnel up -d
+#   docker logs foxrouters-tunnel   # grep trycloudflare.com for the URL
+# For a named tunnel with a custom domain, prefer ./tunnel.sh enable --named.
+#
+# The gateway waits for its dependencies to be healthy before starting.
+
+networks:
+  default:
+    name: foxrouters-net
 
 services:
   redis:
@@ -22,9 +36,13 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # ClickHouse only starts when the `clickhouse` profile is activated
+  # (docker compose --profile clickhouse up …). In the default sqlite mode
+  # this service is skipped, saving ~700MB image + RAM.
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: foxrouters-clickhouse
+    profiles: ["clickhouse"]
     ports:
       - "8123:8123"   # HTTP interface
       - "9000:9000"   # Native TCP (gateway connects here)
@@ -57,20 +75,43 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      clickhouse:
-        condition: service_healthy
     env_file:
       - .env
     environment:
       # Override host-oriented values from .env with container DNS names.
       REDIS_ADDR: redis:6379
+      # Log backend defaults to sqlite via .env; when set to clickhouse the
+      # compose command must also activate the `clickhouse` profile so the
+      # service comes up. CH addr uses the container DNS name.
+      LOG_BACKEND: "${LOG_BACKEND:-sqlite}"
+      LOG_SQLITE_PATH: /var/lib/foxrouters/logs.db
       CLICKHOUSE_ADDR: clickhouse:9000
       CLICKHOUSE_DB: gateway
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
       PORT: "20130"
+    volumes:
+      # Persist the sqlite log DB (only used in the default sqlite backend).
+      # Safe to keep mounted even when running ClickHouse mode — the gateway
+      # only touches this file when LOG_BACKEND=sqlite.
+      - sqlite-data:/var/lib/foxrouters
+    restart: unless-stopped
+
+  # Cloudflare Tunnel — only starts when the `tunnel` profile is activated
+  # (docker compose --profile tunnel up …). Quick mode gives a random
+  # *.trycloudflare.com URL (no domain / no login needed); URL changes on
+  # every restart. For a persistent custom domain use ./tunnel.sh enable
+  # --named after preparing /etc/foxrouters/cloudflared/{cert.pem,config.yml,<id>.json}.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: foxrouters-tunnel
+    profiles: ["tunnel"]
+    depends_on:
+      - foxrouters
+    command: tunnel --no-autoupdate --url http://foxrouters:20130
     restart: unless-stopped
 
 volumes:
   redis-data:
   clickhouse-data:
+  sqlite-data:

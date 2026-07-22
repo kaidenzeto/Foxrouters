@@ -9,23 +9,25 @@
 #
 # What it does:
 #   1. Checks/installs Docker
-#   2. Creates dedicated network + volumes
-#   3. Pulls and starts Redis, ClickHouse, and FoxRouters containers
-#   4. Generates random Redis password + bootstraps gateway admin key
-#   5. Prints gateway key + dashboard URL
+#   2. Prompts for log backend (SQLite default; ClickHouse optional)
+#   3. Creates dedicated network + volumes
+#   4. Pulls and starts Redis (+ ClickHouse if selected) + FoxRouters containers
+#   5. Generates random Redis password + bootstraps gateway admin key
+#   6. Prints gateway key + dashboard URL
+#
+# Non-interactive mode:
+#   Set LOG_BACKEND=sqlite     (default) or LOG_BACKEND=clickhouse before piping to bash.
+#     curl -fsSL … | LOG_BACKEND=clickhouse bash
 #
 # Manage after install:
-#   docker logs foxrouters -f              # tail logs
-#   docker restart foxrouters              # restart gateway
-#   docker stop foxrouters foxrouters-redis foxrouters-clickhouse  # stop all
-#   docker start foxrouters-redis foxrouters-clickhouse foxrouters  # start all
-#   docker rm -f foxrouters foxrouters-redis foxrouters-clickhouse  # remove (keeps volumes)
-#   docker volume rm foxrouters-redis-data foxrouters-clickhouse-data  # wipe data
+#   docker logs foxrouters -f
+#   docker restart foxrouters
+#   docker rm -f foxrouters foxrouters-redis [foxrouters-clickhouse]   # remove (keeps volumes)
 #
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
-IMAGE_GATEWAY="ghcr.io/rilspratama/foxrouters:latest"
+IMAGE_GATEWAY="${IMAGE_GATEWAY:-ghcr.io/rilspratama/foxrouters:latest}"
 IMAGE_REDIS="redis:7-alpine"
 IMAGE_CLICKHOUSE="clickhouse/clickhouse-server:latest"
 GATEWAY_PORT="${FOXROUTERS_PORT:-20130}"
@@ -35,9 +37,14 @@ CH_NATIVE_PORT="${CH_NATIVE_PORT:-9000}"
 NETWORK="foxrouters-net"
 VOL_REDIS="foxrouters-redis-data"
 VOL_CH="foxrouters-clickhouse-data"
+VOL_SQLITE="foxrouters-sqlite-data"
 CONFIG_DIR="/etc/foxrouters"
 ENV_FILE="${CONFIG_DIR}/.env"
 KEY_FILE="${CONFIG_DIR}/gateway-key.txt"
+TUNNEL_CONFIG_DIR="${CONFIG_DIR}/cloudflared"
+TUNNEL_CONTAINER_QUICK="foxrouters-tunnel-quick"
+TUNNEL_CONTAINER_NAMED="foxrouters-tunnel-named"
+IMAGE_TUNNEL="cloudflare/cloudflared:latest"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -52,7 +59,6 @@ err()    { printf '\033[31m[✗]\033[0m %s\n' "$*"; }
 info "Checking Docker..."
 if ! command -v docker &>/dev/null; then
     yellow "Docker not found. Installing..."
-    # Try official install script
     if command -v curl &>/dev/null; then
         curl -fsSL https://get.docker.com | sh
     elif command -v wget &>/dev/null; then
@@ -62,7 +68,6 @@ if ! command -v docker &>/dev/null; then
         err "Install Docker manually: https://docs.docker.com/engine/install/"
         exit 1
     fi
-    # Start Docker service
     systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true
     systemctl enable docker 2>/dev/null || true
     ok "Docker installed"
@@ -70,18 +75,55 @@ else
     ok "Docker found: $(docker --version)"
 fi
 
-# Verify Docker daemon is running
 if ! docker info &>/dev/null; then
     err "Docker daemon not running. Start it with: systemctl start docker"
     exit 1
 fi
 
-# ── Step 2: Generate secrets ────────────────────────────────────────────────
+# ── Step 2: Prompt for log backend ──────────────────────────────────────────
+# Priority:
+#   1. LOG_BACKEND env var (non-interactive install)
+#   2. Auto-detect existing ClickHouse install (upgrade safety)
+#   3. Interactive prompt (only if stdin is a TTY)
+#   4. Default: sqlite
+LOG_BACKEND="${LOG_BACKEND:-}"
+if [[ -z "${LOG_BACKEND}" ]]; then
+    # Auto-detect: existing .env with LOG_BACKEND=clickhouse OR running CH container
+    if [[ -f "${CONFIG_DIR}/.env" ]] && grep -q '^LOG_BACKEND=clickhouse' "${CONFIG_DIR}/.env" 2>/dev/null; then
+        LOG_BACKEND="clickhouse"
+        info "Auto-detected existing ClickHouse config — keeping LOG_BACKEND=clickhouse"
+    elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q 'foxrouters-clickhouse'; then
+        LOG_BACKEND="clickhouse"
+        info "Auto-detected existing ClickHouse container — using LOG_BACKEND=clickhouse"
+    elif [[ -t 0 ]]; then
+        echo ""
+        bold "Log backend"
+        echo "  [1] SQLite     (default, lightweight, ~0 ops cost — recommended)"
+        echo "  [2] ClickHouse (analytics; adds ~700MB image + a service to maintain)"
+        echo ""
+        read -r -p "Choice [1]: " CHOICE || CHOICE=""
+        case "${CHOICE}" in
+            2|ch|clickhouse) LOG_BACKEND="clickhouse" ;;
+            *)               LOG_BACKEND="sqlite"     ;;
+        esac
+    else
+        # Piped install with no LOG_BACKEND set → default to sqlite.
+        LOG_BACKEND="sqlite"
+    fi
+fi
+case "${LOG_BACKEND}" in
+    sqlite|clickhouse) ok "Log backend: ${LOG_BACKEND}" ;;
+    *)
+        err "Unknown LOG_BACKEND=${LOG_BACKEND} — must be sqlite or clickhouse"
+        exit 1
+        ;;
+esac
+
+# ── Step 3: Generate secrets ────────────────────────────────────────────────
 info "Generating secrets..."
 REDIS_PASSWORD=$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | xxd -p)
 CH_PASSWORD=""  # ClickHouse default user has no password by default
 
-# Create config directory
 mkdir -p "${CONFIG_DIR}"
 chmod 700 "${CONFIG_DIR}"
 
@@ -92,6 +134,8 @@ cat > "${ENV_FILE}" << EOF
 REDIS_ADDR=redis:6379
 REDIS_PASSWORD=${REDIS_PASSWORD}
 REDIS_DB=0
+LOG_BACKEND=${LOG_BACKEND}
+LOG_SQLITE_PATH=/var/lib/foxrouters/logs.db
 CLICKHOUSE_ADDR=clickhouse:9000
 CLICKHOUSE_DB=gateway
 CLICKHOUSE_USER=default
@@ -102,92 +146,116 @@ EOF
 chmod 600 "${ENV_FILE}"
 ok "Secrets generated → ${ENV_FILE}"
 
-# ── Step 3: Create network + volumes ─────────────────────────────────────────
+# ── Step 4: Create network + volumes ─────────────────────────────────────────
 info "Creating Docker network + volumes..."
-docker network create "${NETWORK}" 2>/dev/null || ok "Network ${NETWORK} already exists"
-docker volume create "${VOL_REDIS}" 2>/dev/null || ok "Volume ${VOL_REDIS} already exists"
-docker volume create "${VOL_CH}" 2>/dev/null || ok "Volume ${VOL_CH} already exists"
+docker network create "${NETWORK}"    2>/dev/null || ok "Network ${NETWORK} already exists"
+docker volume  create "${VOL_REDIS}"  2>/dev/null || ok "Volume ${VOL_REDIS} already exists"
+docker volume  create "${VOL_SQLITE}" 2>/dev/null || ok "Volume ${VOL_SQLITE} already exists"
 
-# ── Step 4: Pull images ─────────────────────────────────────────────────────
+# Fix volume ownership: gateway runs as UID 1000 (non-root).
+# Without this, SQLite can't write to /var/lib/foxrouters/logs.db.
+docker run --rm -v "${VOL_SQLITE}:/data" alpine chown -R 1000:1000 /data 2>/dev/null || true
+if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+    docker volume create "${VOL_CH}" 2>/dev/null || ok "Volume ${VOL_CH} already exists"
+fi
+
+# ── Step 5: Pull images ─────────────────────────────────────────────────────
 info "Pulling images (this may take a few minutes on first run)..."
-docker pull "${IMAGE_REDIS}"        2>&1 | tail -1
-docker pull "${IMAGE_CLICKHOUSE}"   2>&1 | tail -1
-docker pull "${IMAGE_GATEWAY}"      2>&1 | tail -1
+docker pull "${IMAGE_REDIS}"      2>&1 | tail -1
+if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+    docker pull "${IMAGE_CLICKHOUSE}"  2>&1 | tail -1
+fi
+# Only pull gateway if not already present locally (avoid overwriting local builds)
+if ! docker image inspect "${IMAGE_GATEWAY}" &>/dev/null; then
+    docker pull "${IMAGE_GATEWAY}"    2>&1 | tail -1
+else
+    ok "Gateway image found locally: ${IMAGE_GATEWAY}"
+fi
 ok "Images pulled"
 
-# ── Step 5: Start Redis ─────────────────────────────────────────────────────
+# ── Step 6: Start Redis ─────────────────────────────────────────────────────
 info "Starting Redis..."
 docker rm -f foxrouters-redis 2>/dev/null || true
 docker run -d \
     --name foxrouters-redis \
     --network "${NETWORK}" \
     --network-alias redis \
-    -p "${REDIS_PORT}:6379" \
+    -p "127.0.0.1:${REDIS_PORT}:6379" \
     -v "${VOL_REDIS}:/data" \
     --restart unless-stopped \
     "${IMAGE_REDIS}" \
     redis-server --requirepass "${REDIS_PASSWORD}" --appendonly no
 ok "Redis started (port ${REDIS_PORT})"
 
-# ── Step 6: Start ClickHouse ────────────────────────────────────────────────
-info "Starting ClickHouse..."
-docker rm -f foxrouters-clickhouse 2>/dev/null || true
-docker run -d \
-    --name foxrouters-clickhouse \
-    --network "${NETWORK}" \
-    --network-alias clickhouse \
-    -p "${CH_HTTP_PORT}:8123" \
-    -p "${CH_NATIVE_PORT}:9000" \
-    -v "${VOL_CH}:/var/lib/clickhouse" \
-    --ulimit nofile=262144:262144 \
-    --restart unless-stopped \
-    -e CLICKHOUSE_USER=default \
-    -e CLICKHOUSE_PASSWORD="${CH_PASSWORD}" \
-    -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
-    "${IMAGE_CLICKHOUSE}"
-ok "ClickHouse started (HTTP ${CH_HTTP_PORT}, Native ${CH_NATIVE_PORT})"
+# ── Step 7: Start ClickHouse (only if selected) ─────────────────────────────
+if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+    info "Starting ClickHouse..."
+    docker rm -f foxrouters-clickhouse 2>/dev/null || true
+    docker run -d \
+        --name foxrouters-clickhouse \
+        --network "${NETWORK}" \
+        --network-alias clickhouse \
+        -p "127.0.0.1:${CH_HTTP_PORT}:8123" \
+        -p "127.0.0.1:${CH_NATIVE_PORT}:9000" \
+        -v "${VOL_CH}:/var/lib/clickhouse" \
+        --ulimit nofile=262144:262144 \
+        --restart unless-stopped \
+        -e CLICKHOUSE_USER=default \
+        -e CLICKHOUSE_PASSWORD="${CH_PASSWORD}" \
+        -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+        "${IMAGE_CLICKHOUSE}"
+    ok "ClickHouse started (HTTP ${CH_HTTP_PORT}, Native ${CH_NATIVE_PORT})"
+else
+    info "SQLite mode — skipping ClickHouse container"
+    # Best-effort cleanup of a stale CH container from a prior CH install.
+    docker rm -f foxrouters-clickhouse 2>/dev/null || true
+fi
 
-# ── Step 7: Wait for Redis + CH healthy ─────────────────────────────────────
-info "Waiting for Redis + ClickHouse to be healthy..."
+# ── Step 8: Wait for dependencies healthy ───────────────────────────────────
+info "Waiting for Redis${LOG_BACKEND:+ + ${LOG_BACKEND}} to be healthy..."
 for i in $(seq 1 30); do
     REDIS_OK=$(docker exec foxrouters-redis redis-cli -a "${REDIS_PASSWORD}" ping 2>/dev/null || echo "FAIL")
-    CH_OK=$(curl -sf "http://127.0.0.1:${CH_HTTP_PORT}/ping" 2>/dev/null || echo "FAIL")
+    if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+        CH_OK=$(curl -sf "http://127.0.0.1:${CH_HTTP_PORT}/ping" 2>/dev/null || echo "FAIL")
+    else
+        CH_OK="Ok."
+    fi
     if [[ "${REDIS_OK}" == "PONG" && "${CH_OK}" == "Ok." ]]; then
-        ok "Redis + ClickHouse healthy"
+        ok "Dependencies healthy"
         break
     fi
     printf "."
     sleep 2
     if [[ $i -eq 30 ]]; then
-        err "Timeout waiting for Redis + ClickHouse"
+        err "Timeout waiting for dependencies"
         docker logs foxrouters-redis --tail 5
-        docker logs foxrouters-clickhouse --tail 5
+        [[ "${LOG_BACKEND}" == "clickhouse" ]] && docker logs foxrouters-clickhouse --tail 5
         exit 1
     fi
 done
 
-# ── Step 8: Start FoxRouters gateway ────────────────────────────────────────
+# ── Step 9: Start FoxRouters gateway ────────────────────────────────────────
 info "Starting FoxRouters gateway..."
 docker rm -f foxrouters 2>/dev/null || true
 docker run -d \
     --name foxrouters \
     --network "${NETWORK}" \
-    -p "${GATEWAY_PORT}:20130" \
+    -p "127.0.0.1:${GATEWAY_PORT}:20130" \
+    -v "${VOL_SQLITE}:/var/lib/foxrouters" \
     --restart unless-stopped \
     --env-file "${ENV_FILE}" \
     -e REDIS_ADDR=redis:6379 \
+    -e LOG_BACKEND="${LOG_BACKEND}" \
+    -e LOG_SQLITE_PATH=/var/lib/foxrouters/logs.db \
     -e CLICKHOUSE_ADDR=clickhouse:9000 \
     -e CLICKHOUSE_DB=gateway \
     -e CLICKHOUSE_USER=default \
     -e CLICKHOUSE_PASSWORD="${CH_PASSWORD}" \
     -e PORT=20130 \
     "${IMAGE_GATEWAY}"
-ok "FoxRouters started (port ${GATEWAY_PORT})"
+ok "FoxRouters started (port ${GATEWAY_PORT}, log backend: ${LOG_BACKEND})"
 
-# ── Step 9: Capture gateway key from Redis ──────────────────────────────────
-# Redis is the single source of truth. Gateway writes the bootstrap key to
-# Redis on first boot, or loads existing keys on re-deploy. Either way,
-# the full (unmasked) key is in HASH gw:key:* field "key".
+# ── Step 10: Capture gateway key from Redis ─────────────────────────────────
 info "Waiting for gateway to write key to Redis (up to 30s)..."
 BOOTSTRAP_KEY=""
 for i in $(seq 1 30); do
@@ -212,7 +280,7 @@ echo "${BOOTSTRAP_KEY}" > "${KEY_FILE}"
 chmod 600 "${KEY_FILE}"
 ok "Gateway key captured → ${KEY_FILE}"
 
-# ── Step 10: Health check ───────────────────────────────────────────────────
+# ── Step 11: Health check ───────────────────────────────────────────────────
 info "Health check..."
 sleep 3
 HEALTH=$(curl -sf "http://127.0.0.1:${GATEWAY_PORT}/health" 2>/dev/null || echo "FAIL")
@@ -222,6 +290,110 @@ else
     err "Gateway not healthy yet. Check: docker logs foxrouters"
     err "Response: ${HEALTH}"
 fi
+
+# ── Step 12: Cloudflare Tunnel (optional) ───────────────────────────────────
+# Priority:
+#   1. TUNNEL_MODE env var (non-interactive install: quick|named|none)
+#   2. Interactive prompt (only if stdin is a TTY)
+#   3. Default: none (piped installs stay tunnel-free)
+TUNNEL_MODE="${TUNNEL_MODE:-}"
+if [[ -z "${TUNNEL_MODE}" ]]; then
+    if [[ -t 0 ]]; then
+        echo ""
+        bold "Cloudflare Tunnel"
+        echo "  Expose the gateway publicly via Cloudflare (no firewall changes)."
+        echo "  [1] Quick — random *.trycloudflare.com URL (no domain, no login)"
+        echo "  [2] Named — custom domain (requires prior cloudflared login + create)"
+        echo "  [3] Hybrid — BOTH quick + named (quick now, add named later)"
+        echo "  [4] No tunnel"
+        echo ""
+        read -r -p "Choice [4]: " TCHOICE || TCHOICE=""
+        case "${TCHOICE}" in
+            1|q|quick)   TUNNEL_MODE="quick" ;;
+            2|n|named)   TUNNEL_MODE="named" ;;
+            3|h|hybrid)  TUNNEL_MODE="hybrid" ;;
+            *)           TUNNEL_MODE="none"  ;;
+        esac
+    else
+        TUNNEL_MODE="none"
+    fi
+fi
+case "${TUNNEL_MODE}" in
+    none|quick|named|hybrid) ;;
+    *)
+        err "Unknown TUNNEL_MODE=${TUNNEL_MODE} — must be none, quick, named, or hybrid"
+        exit 1
+        ;;
+esac
+
+TUNNEL_URL=""
+TUNNEL_CONTAINER_QUICK="foxrouters-tunnel-quick"
+TUNNEL_CONTAINER_NAMED="foxrouters-tunnel-named"
+
+start_quick_tunnel() {
+    info "Starting Cloudflare quick tunnel..."
+    docker pull "${IMAGE_TUNNEL}" 2>&1 | tail -1 || true
+    docker rm -f "${TUNNEL_CONTAINER_QUICK}" 2>/dev/null || true
+    docker run -d \
+        --name "${TUNNEL_CONTAINER_QUICK}" \
+        --network "${NETWORK}" \
+        --restart unless-stopped \
+        "${IMAGE_TUNNEL}" \
+        tunnel --no-autoupdate --url "http://foxrouters:20130" >/dev/null
+    info "Waiting for quick tunnel URL (up to 30s)..."
+    for _ in $(seq 1 30); do
+        TUNNEL_URL=$(docker logs "${TUNNEL_CONTAINER_QUICK}" 2>&1 \
+            | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+            | head -1 || true)
+        [[ -n "${TUNNEL_URL}" ]] && break
+        sleep 1
+    done
+    if [[ -n "${TUNNEL_URL}" ]]; then
+        ok "Quick tunnel URL: ${TUNNEL_URL}"
+    else
+        err "Could not capture quick tunnel URL. Check: docker logs ${TUNNEL_CONTAINER_QUICK}"
+    fi
+}
+
+print_named_setup() {
+    echo ""
+    yellow "  Named tunnels require manual one-time setup:"
+    echo "    1. cloudflared tunnel login"
+    echo "    2. cloudflared tunnel create foxrouters"
+    echo "    3. sudo mkdir -p ${TUNNEL_CONFIG_DIR}"
+    echo "       sudo cp ~/.cloudflared/cert.pem        ${TUNNEL_CONFIG_DIR}/"
+    echo "       sudo cp ~/.cloudflared/<tunnel>.json   ${TUNNEL_CONFIG_DIR}/"
+    echo "    4. Write ${TUNNEL_CONFIG_DIR}/config.yml with ingress rules"
+    echo "    5. cloudflared tunnel route dns foxrouters gateway.example.com"
+    echo "    6. ./tunnel.sh enable --named  (or --hybrid to run both)"
+    echo ""
+}
+
+mkdir -p "${TUNNEL_CONFIG_DIR}"
+
+case "${TUNNEL_MODE}" in
+    quick)
+        echo "quick" > "${TUNNEL_CONFIG_DIR}/mode"
+        start_quick_tunnel
+        ;;
+    named)
+        echo "named" > "${TUNNEL_CONFIG_DIR}/mode"
+        info "Named tunnel selected — auto-start skipped (needs prior setup)."
+        print_named_setup
+        ;;
+    hybrid)
+        echo "hybrid" > "${TUNNEL_CONFIG_DIR}/mode"
+        info "Hybrid mode: starting quick tunnel now..."
+        start_quick_tunnel
+        echo ""
+        info "Named tunnel: auto-start skipped (needs prior setup)."
+        info "After setup, run: ./tunnel.sh enable --hybrid"
+        print_named_setup
+        ;;
+    none)
+        echo "none" > "${TUNNEL_CONFIG_DIR}/mode"
+        ;;
+esac
 
 # ── Summary ─────────────────────────────────────────────────────────────────
 echo ""
@@ -239,14 +411,30 @@ fi
 echo "  Dashboard:    http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost'):${GATEWAY_PORT}/dashboard"
 echo "  API Base:     http://localhost:${GATEWAY_PORT}/v1/chat/completions"
 echo "  Health:       http://localhost:${GATEWAY_PORT}/health"
+echo "  Log backend:  ${LOG_BACKEND}"
+if [[ "${TUNNEL_MODE}" == "quick" && -n "${TUNNEL_URL}" ]]; then
+    echo "  Tunnel:       ${TUNNEL_URL}  (quick — URL changes on restart)"
+elif [[ "${TUNNEL_MODE}" == "named" ]]; then
+    echo "  Tunnel:       named (finish setup, then ./tunnel.sh enable --named)"
+elif [[ "${TUNNEL_MODE}" == "hybrid" && -n "${TUNNEL_URL}" ]]; then
+    echo "  Tunnel:       ${TUNNEL_URL}  (quick active, add named via ./tunnel.sh enable --hybrid)"
+else
+    echo "  Tunnel:       disabled  (./tunnel.sh enable to add one later)"
+fi
 echo ""
 echo "  Config:       ${ENV_FILE}"
 echo ""
 echo "  Manage:"
 echo "    docker logs foxrouters -f           # tail logs"
 echo "    docker restart foxrouters           # restart gateway"
-echo "    docker stop foxrouters-redis foxrouters-clickhouse foxrouters  # stop all"
-echo "    docker start foxrouters-redis foxrouters-clickhouse foxrouters  # start all"
-echo "    docker rm -f foxrouters foxrouters-redis foxrouters-clickhouse  # remove (keeps data)"
+if [[ "${LOG_BACKEND}" == "clickhouse" ]]; then
+    echo "    docker stop foxrouters-redis foxrouters-clickhouse foxrouters"
+    echo "    docker start foxrouters-redis foxrouters-clickhouse foxrouters"
+    echo "    docker rm -f foxrouters foxrouters-redis foxrouters-clickhouse"
+else
+    echo "    docker stop foxrouters-redis foxrouters"
+    echo "    docker start foxrouters-redis foxrouters"
+    echo "    docker rm -f foxrouters foxrouters-redis"
+fi
 echo ""
 bold "═══════════════════════════════════════════════════════════════"

@@ -62,6 +62,12 @@ var (
 	handleDeleteProxy  = handlers.HandleDeleteProxy
 	handleToggleProxy  = handlers.HandleToggleProxy
 	handleTestProxy    = handlers.HandleTestProxy
+
+	// v1.6.0 — Cloudflare Tunnel (first-class Go feature)
+	handleTunnelStatus  = handlers.HandleTunnelStatus
+	handleTunnelEnable  = handlers.HandleTunnelEnable
+	handleTunnelDisable = handlers.HandleTunnelDisable
+	handleTunnelRestart = handlers.HandleTunnelRestart
 )
 
 // Function wrappers for handlers whose signature changed to accept
